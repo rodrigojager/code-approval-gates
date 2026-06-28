@@ -50,7 +50,7 @@ Na prática:
     -v "<pasta-do-projeto>:/workspace" \
     -v "<pasta-do-projeto>/.quality/reports:/workspace/.quality/reports" \
     -w /workspace \
-    harness-gates/quality-sidecar:latest \
+    code-approval-gates/quality-sidecar:latest \
     check /workspace
 
 No PowerShell:
@@ -59,7 +59,7 @@ No PowerShell:
     -v "${PWD}:/workspace" `
     -v "${PWD}/.quality/reports:/workspace/.quality/reports" `
     -w /workspace `
-    harness-gates/quality-sidecar:latest `
+    code-approval-gates/quality-sidecar:latest `
     check /workspace
 
 
@@ -131,7 +131,7 @@ Deve:
   1. validar se Docker está disponível;
   2. resolver o caminho absoluto da pasta atual;
   3. criar `.quality/reports` se não existir;
-  4. executar o container `harness-gates/quality-sidecar:latest`;
+  4. executar o container `code-approval-gates/quality-sidecar:latest`;
   5. montar a pasta alvo em `/workspace`;
   6. rodar `check /workspace` dentro do container;
   7. gerar relatórios em `.quality/reports`;
@@ -164,7 +164,7 @@ Exemplos:
   quality-check . --disable-iac
   quality-check . --format=json,md
   quality-check . --output .quality/reports
-  quality-check . --image harness-gates/quality-sidecar:dev
+  quality-check . --image code-approval-gates/quality-sidecar:dev
 
 
 Flags específicas do wrapper
@@ -174,7 +174,7 @@ Estas flags pertencem ao wrapper local:
 
   --image <imagem>
       Define qual imagem Docker usar.
-      Padrão: harness-gates/quality-sidecar:latest
+      Padrão: code-approval-gates/quality-sidecar:latest
 
   --pull
       Faz `docker pull` da imagem antes de executar.
@@ -226,7 +226,7 @@ Arquivo: quality-check.ps1
     [Parameter(Position=0)]
     [string]$Target = ".",
 
-    [string]$Image = "harness-gates/quality-sidecar:latest",
+    [string]$Image = "code-approval-gates/quality-sidecar:latest",
     [switch]$Pull,
     [switch]$NoPull,
     [switch]$DebugDocker,
@@ -300,7 +300,7 @@ Permitindo secrets apenas em exemplos:
 
 Usando imagem dev:
 
-  .\quality-check.ps1 . -Image harness-gates/quality-sidecar:dev
+  .\quality-check.ps1 . -Image code-approval-gates/quality-sidecar:dev
 
 Mostrando o docker run final:
 
@@ -324,7 +324,7 @@ Arquivo: bin/quality-check.js
   const target = args[0] && !args[0].startsWith("-") ? args.shift() : ".";
 
   const imageFlagIndex = args.indexOf("--image");
-  let image = process.env.QUALITY_SIDECAR_IMAGE || "harness-gates/quality-sidecar:latest";
+  let image = process.env.QUALITY_SIDECAR_IMAGE || "code-approval-gates/quality-sidecar:latest";
 
   if (imageFlagIndex >= 0) {
     image = args[imageFlagIndex + 1];
@@ -409,7 +409,7 @@ O fluxo final passa a ser:
 
   wrapper local executa:
 
-    docker run --rm -v "projeto:/workspace" harness-gates/quality-sidecar:latest check /workspace
+    docker run --rm -v "projeto:/workspace" code-approval-gates/quality-sidecar:latest check /workspace
 
   container executa:
 

@@ -5,7 +5,7 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const DEFAULT_IMAGE = "harness-gates/quality-sidecar:latest";
+const DEFAULT_IMAGE = "code-approval-gates/quality-sidecar:latest";
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 
 function takeValue(raw, index, flag, options = {}) {

@@ -41,15 +41,23 @@ Not required:
 
 ## Install
 
-From this repository:
+From the Code Approval Gates repository root:
 
 ```powershell
-npm install --workspaces=false
-npm run build
+git clone https://github.com/rodrigojager/code-approval-gates.git
+cd code-approval-gates
 npm install -g .
 ```
 
-Or run without linking:
+From the `semantic-gate` package folder during development:
+
+```powershell
+npm install --workspaces=false
+npm run build --workspaces=false
+npm install -g .
+```
+
+Or run without linking after building:
 
 ```powershell
 node dist/cli.js run --objective-file objective.md
@@ -57,10 +65,10 @@ node dist/cli.js run --objective-file objective.md
 
 The CLI is designed for Windows, Linux, and macOS. It uses Node.js process spawning rather than shell-specific quoting.
 
-After package publication, CI and users can install the package directly:
+The repository root install exposes `semantic-gate` globally. Direct standalone npm package publication is optional and is not required for GitHub-based use.
 
 ```bash
-npm install -g semantic-gate
+semantic-gate --help
 ```
 
 ## Configure Once

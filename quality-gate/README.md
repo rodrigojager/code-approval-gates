@@ -1,10 +1,10 @@
-# Harness Quality Gate
+# Code Approval Quality Gate
 
 This repository implements the `quality-gate.txt` contract:
 
 - `quality-check` is a thin local wrapper.
 - `quality-check .` runs Docker by default.
-- The complete analysis happens inside `harness-gates/quality-sidecar`.
+- The complete analysis happens inside `code-approval-gates/quality-sidecar`.
 - Local native fallback is not used silently.
 - The npm package includes the sidecar Docker build context, so local and Git installs can build the default image without a separate registry push.
 
@@ -16,7 +16,7 @@ Required:
 
 - Node.js `>=18`.
 - Docker Desktop or Docker Engine installed, running, and accessible from the current shell or CI runner.
-- Network access on first image build or pull, unless `harness-gates/quality-sidecar:latest` or your custom image already exists locally.
+- Network access on first image build or pull, unless `code-approval-gates/quality-sidecar:latest` or your custom image already exists locally.
 
 Not required:
 
@@ -37,15 +37,15 @@ docker run --rm `
   -v "${PWD}:/workspace" `
   -v "${PWD}/.quality/reports:/workspace/.quality/reports" `
   -w /workspace `
-  harness-gates/quality-sidecar:latest `
+  code-approval-gates/quality-sidecar:latest `
   check /workspace
 ```
 
-If `harness-gates/quality-sidecar:latest` is not available locally, the wrapper builds the bundled image automatically from this package before running the check. This keeps local-folder and future Git repository installs self-contained.
+If `code-approval-gates/quality-sidecar:latest` is not available locally, the wrapper builds the bundled image automatically from this package before running the check. This keeps local-folder and Git-based installs self-contained.
 
 Available local wrapper flags:
 
-- `--image <image>`: defaults to `harness-gates/quality-sidecar:latest`.
+- `--image <image>`: defaults to `code-approval-gates/quality-sidecar:latest`.
 - `--pull`: runs `docker pull` before analysis.
 - `--no-pull`: disables a requested pull.
 - `--build`: forces auto-build behavior when the image is missing.
@@ -79,23 +79,25 @@ The sidecar runs:
 
 ## Usage
 
-Install from this local folder during development:
+Install both gates from the Code Approval Gates repository root:
+
+```powershell
+git clone https://github.com/rodrigojager/code-approval-gates.git
+cd code-approval-gates
+npm install -g .
+```
+
+Install from this local `quality-gate` folder during development:
 
 ```powershell
 npm install --workspaces=false
 npm install -g .
 ```
 
-Future Git repository install will use the same package contents:
-
-```powershell
-npm install -g <your-future-git-url>
-```
-
-After package publication, CI and users can install the package directly:
+The repository root install exposes `quality-check` globally. Direct standalone npm package publication is optional and is not required for GitHub-based use.
 
 ```bash
-npm install -g quality-check
+quality-check .
 ```
 
 PowerShell from a project folder:
@@ -115,7 +117,7 @@ quality-check . --enable-coverage --min-line-coverage 80
 quality-check . --disable-iac
 quality-check . --format=json,md
 quality-check . --output .quality/reports
-quality-check . --image harness-gates/quality-sidecar:dev
+quality-check . --image code-approval-gates/quality-sidecar:dev
 quality-check . --pull --debug-docker
 ```
 
@@ -195,7 +197,7 @@ That skill is independent from the deterministic report: it reviews the current 
 ## Build Image
 
 ```powershell
-docker build -t harness-gates/quality-sidecar:latest .
+docker build -t code-approval-gates/quality-sidecar:latest .
 npm run build:image
 ```
 
@@ -207,7 +209,7 @@ End-to-end Docker verification from this repository checkout:
 .\scripts\verify-docker.ps1
 ```
 
-The script builds `harness-gates/quality-sidecar:local`, runs a smoke `check /workspace`, and verifies that `quality-report.json` is created.
+The script builds `code-approval-gates/quality-sidecar:local`, runs a smoke `check /workspace`, and verifies that `quality-report.json` is created.
 
 Run the sidecar directly:
 
@@ -216,7 +218,7 @@ docker run --rm `
   -v "${PWD}:/workspace" `
   -v "${PWD}/.quality/reports:/workspace/.quality/reports" `
   -w /workspace `
-  harness-gates/quality-sidecar:latest `
+  code-approval-gates/quality-sidecar:latest `
   check /workspace --threshold 90
 ```
 

@@ -1,5 +1,5 @@
 param(
-  [string]$Image = "harness-gates/quality-sidecar:local",
+  [string]$Image = "code-approval-gates/quality-sidecar:local",
   [string]$FixturePath = ""
 )
 

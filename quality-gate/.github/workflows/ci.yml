@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build sidecar image
-        run: docker build -t harness-gates/quality-sidecar:ci .
+        run: docker build -t code-approval-gates/quality-sidecar:ci .
       - name: Prepare fixture
         run: |
           mkdir -p /tmp/quality-sidecar-fixture
@@ -39,7 +39,7 @@ jobs:
             -v "/tmp/quality-sidecar-fixture:/workspace" \
             -v "/tmp/quality-sidecar-fixture/.quality/reports:/workspace/.quality/reports" \
             -w /workspace \
-            harness-gates/quality-sidecar:ci \
+            code-approval-gates/quality-sidecar:ci \
             check /workspace --mode quick --format json,md
           test -f /tmp/quality-sidecar-fixture/.quality/reports/quality-report.json
 

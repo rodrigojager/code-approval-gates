@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://harness-gates.invalid/schemas/semantic-gate/semantic-result.schema.json",
+  "$id": "https://code-approval-gates.invalid/schemas/semantic-gate/semantic-result.schema.json",
   "title": "Semantic Gate Result",
   "type": "object",
   "required": [

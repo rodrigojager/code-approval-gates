@@ -1,8 +1,8 @@
-# Harness Gates
+# Code Approval Gates
 
 ## 🇺🇸 English
 
-Harness Gates provides two approval gates for code generated or maintained by humans and AI agents. The goal is to keep code quality above a minimum accepted score before commit, pull request, merge, release, or handoff.
+Code Approval Gates provides two approval gates for code generated or maintained by humans and AI agents. The goal is to keep code quality above a minimum accepted score before commit, pull request, merge, release, or handoff.
 
 The gates evaluate the repository, produce normalized reports, calculate a score, and return an approval status. A failing result is intended to be actionable: an agent can fix the code and rerun the same gates in a loop until the code reaches the required quality threshold, without lowering thresholds, changing to easier providers, disabling checks, adding silent waivers, or rewriting the objective to fit the implementation.
 
@@ -15,7 +15,7 @@ Together, they act like a quality test for AI coding workflows: code is not cons
 
 ### What The Gates Evaluate
 
-`quality-check` evaluates code deterministically through the bundled `harness-gates/quality-sidecar`. In full mode it can run:
+`quality-check` evaluates code deterministically through the bundled `code-approval-gates/quality-sidecar`. In full mode it can run:
 
 - MegaLinter.
 - Semgrep.
@@ -51,18 +51,20 @@ quality-check . --threshold 90 --format=json,md --output .quality/reports
 
 For agent workflows, use `use-semantic-gate` first and `use-quality-gate` second. The skills instruct the agent to fix the code in a loop until the gates approve while keeping the same gate configuration.
 
-### Install From This Folder
+### Install From GitHub
 
-Use this while the future Git repository/package registry is not published yet:
+Clone the repository and install both global commands from the root:
+
+```powershell
+git clone https://github.com/rodrigojager/code-approval-gates.git
+cd code-approval-gates
+npm install -g .
+```
+
+From an existing local checkout, you can use the helper:
 
 ```powershell
 npm run link:local
-```
-
-You can also install both commands directly from this folder:
-
-```powershell
-npm install -g .
 ```
 
 Equivalent per-package development commands:
@@ -76,10 +78,10 @@ npm --prefix .\quality-gate install --workspaces=false
 npm install -g .\quality-gate
 ```
 
-After publishing, replace the local install lines with the package or Git URL you choose:
+You can also install directly from the Git URL:
 
 ```bash
-npm install -g <your-future-git-url>
+npm install -g https://github.com/rodrigojager/code-approval-gates.git
 ```
 
 The repository root exposes both global binaries:
@@ -106,7 +108,7 @@ Quality gate only:
 - Node.js `>=18`.
 - Docker Desktop or Docker Engine installed, running, and accessible from the shell/runner.
 - Network access on first image build/pull unless the sidecar image is already present.
-- The npm package includes the Docker build context and auto-builds `harness-gates/quality-sidecar:latest` when missing.
+- The npm package includes the Docker build context and auto-builds `code-approval-gates/quality-sidecar:latest` when missing.
 - `--mode quick` and `--mode offline` are development-only partial modes. Do not use them to claim full gate approval.
 - Checkov IaC scanning is enabled by default in full mode and can be disabled with `--disable-iac`.
 - Coverage thresholds are disabled by default and must be enabled with `--enable-coverage`.
@@ -179,7 +181,7 @@ This runs package tests and dry-run packaging checks for both gates. Docker imag
 
 ## 🇧🇷 Português
 
-Harness Gates fornece dois gates de aprovação para código gerado ou mantido por pessoas e agentes de IA. O objetivo é manter a qualidade do código acima de uma pontuação mínima aceita antes de commit, pull request, merge, release ou entrega.
+Code Approval Gates fornece dois gates de aprovação para código gerado ou mantido por pessoas e agentes de IA. O objetivo é manter a qualidade do código acima de uma pontuação mínima aceita antes de commit, pull request, merge, release ou entrega.
 
 Os gates avaliam o repositório, geram relatórios normalizados, calculam uma pontuação e retornam um status de aprovação. Um resultado reprovado deve ser acionável: um agente pode corrigir o código e rodar os mesmos gates em loop até atingir o limite mínimo de qualidade, sem reduzir thresholds, trocar para providers mais fáceis, desabilitar checks, adicionar waivers silenciosos ou reescrever o objetivo para combinar com a implementação.
 
@@ -192,7 +194,7 @@ Juntos, eles funcionam como um teste de qualidade para fluxos de programação c
 
 ### O Que Os Gates Avaliam
 
-O `quality-check` avalia o código de forma determinística usando o `harness-gates/quality-sidecar` embarcado. Em modo full, ele pode executar:
+O `quality-check` avalia o código de forma determinística usando o `code-approval-gates/quality-sidecar` embarcado. Em modo full, ele pode executar:
 
 - MegaLinter.
 - Semgrep.
@@ -228,18 +230,20 @@ quality-check . --threshold 90 --format=json,md --output .quality/reports
 
 Para fluxos com agentes, use `use-semantic-gate` primeiro e `use-quality-gate` depois. As skills instruem o agente a corrigir o código em loop até os gates aprovarem, mantendo a mesma configuração dos gates.
 
-### Instalação A Partir Desta Pasta
+### Instalação Pelo GitHub
 
-Use isto enquanto o futuro repositório Git ou package registry ainda não foi publicado:
+Clone o repositório e instale os dois comandos globais pela raiz:
+
+```powershell
+git clone https://github.com/rodrigojager/code-approval-gates.git
+cd code-approval-gates
+npm install -g .
+```
+
+Em um checkout local existente, você pode usar o helper:
 
 ```powershell
 npm run link:local
-```
-
-Também é possível instalar os dois comandos diretamente desta pasta:
-
-```powershell
-npm install -g .
 ```
 
 Comandos equivalentes por pacote durante desenvolvimento:
@@ -253,10 +257,10 @@ npm --prefix .\quality-gate install --workspaces=false
 npm install -g .\quality-gate
 ```
 
-Depois da publicação, substitua a instalação local pelo pacote ou URL Git escolhido:
+Você também pode instalar diretamente pela URL Git:
 
 ```bash
-npm install -g <your-future-git-url>
+npm install -g https://github.com/rodrigojager/code-approval-gates.git
 ```
 
 A raiz do repositório expõe os dois binários globais:
@@ -283,7 +287,7 @@ Somente quality gate:
 - Node.js `>=18`.
 - Docker Desktop ou Docker Engine instalado, rodando e acessível pelo shell/runner.
 - Acesso à rede no primeiro build/pull da imagem, salvo se a imagem do sidecar já estiver presente.
-- O pacote npm inclui o contexto de build Docker e constrói automaticamente `harness-gates/quality-sidecar:latest` quando a imagem estiver ausente.
+- O pacote npm inclui o contexto de build Docker e constrói automaticamente `code-approval-gates/quality-sidecar:latest` quando a imagem estiver ausente.
 - `--mode quick` e `--mode offline` são modos parciais para desenvolvimento. Não use esses modos para declarar aprovação completa.
 - Checkov para IaC fica habilitado por padrão em modo full e pode ser desabilitado com `--disable-iac`.
 - Thresholds de coverage ficam desabilitados por padrão e precisam ser habilitados com `--enable-coverage`.

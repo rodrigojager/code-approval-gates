@@ -18,7 +18,7 @@ function NormalizeFormatValue([string]$Value) {
 
 $RawArgs = @($args)
 $Target = "."
-$Image = if ($env:QUALITY_SIDECAR_IMAGE) { $env:QUALITY_SIDECAR_IMAGE } else { "harness-gates/quality-sidecar:latest" }
+$Image = if ($env:QUALITY_SIDECAR_IMAGE) { $env:QUALITY_SIDECAR_IMAGE } else { "code-approval-gates/quality-sidecar:latest" }
 $Pull = $false
 $NoPull = $false
 $Build = -not ($env:QUALITY_CHECK_AUTO_BUILD -eq "0" -or $env:QUALITY_CHECK_NO_BUILD -eq "1")

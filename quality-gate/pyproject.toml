@@ -1,7 +1,7 @@
 [project]
-name = "harness-quality-sidecar"
+name = "code-approval-quality-sidecar"
 version = "0.1.0"
-description = "Container-side quality gate runner for Harness Gates projects."
+description = "Container-side quality gate runner for Code Approval Gates projects."
 requires-python = ">=3.11"
 license = { text = "MIT" }
 

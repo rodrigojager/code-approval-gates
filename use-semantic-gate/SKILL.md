@@ -43,7 +43,7 @@ semantic-gate status
 If the command is missing and the local source checkout exists, bootstrap the CLI without changing gate behavior:
 
 ```powershell
-Push-Location "C:\Users\Rodrigo\Desktop\harness gates\semantic-gate"
+Push-Location "C:\path\to\code-approval-gates\semantic-gate"
 npm install --workspaces=false
 npm run build --workspaces=false
 npm install -g .
@@ -54,7 +54,7 @@ semantic-gate status
 On Linux or macOS, use the same commands from the local `semantic-gate` checkout:
 
 ```bash
-cd "/path/to/harness-gates/semantic-gate"
+cd "/path/to/code-approval-gates/semantic-gate"
 npm install --workspaces=false
 npm run build --workspaces=false
 npm install -g .

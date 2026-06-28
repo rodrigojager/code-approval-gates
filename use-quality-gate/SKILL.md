@@ -50,7 +50,7 @@ command -v quality-check
 If `quality-check` is missing and the local quality-gate checkout exists, bootstrap the wrapper:
 
 ```powershell
-Push-Location "C:\Users\Rodrigo\Desktop\harness gates\quality-gate"
+Push-Location "C:\path\to\code-approval-gates\quality-gate"
 npm install --workspaces=false
 npm install -g .
 Pop-Location
@@ -60,7 +60,7 @@ Get-Command quality-check -ErrorAction SilentlyContinue
 On Linux or macOS, use the same commands from the local `quality-gate` checkout:
 
 ```bash
-cd "/path/to/harness-gates/quality-gate"
+cd "/path/to/code-approval-gates/quality-gate"
 npm install --workspaces=false
 npm install -g .
 command -v quality-check

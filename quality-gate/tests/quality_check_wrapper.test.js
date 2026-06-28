@@ -42,7 +42,7 @@ test("parseArgs consumes wrapper-only flags", () => {
   const parsed = parseArgs([
     "src",
     "--image",
-    "harness-gates/quality-sidecar:dev",
+    "code-approval-gates/quality-sidecar:dev",
     "--pull",
     "--docker-arg",
     "--network=none",
@@ -52,7 +52,7 @@ test("parseArgs consumes wrapper-only flags", () => {
   ], {});
 
   assert.equal(parsed.target, "src");
-  assert.equal(parsed.image, "harness-gates/quality-sidecar:dev");
+  assert.equal(parsed.image, "code-approval-gates/quality-sidecar:dev");
   assert.equal(parsed.pull, true);
   assert.equal(parsed.build, true);
   assert.equal(parsed.debugDocker, true);

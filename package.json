@@ -1,5 +1,5 @@
 {
-  "name": "harness-gates",
+  "name": "code-approval-gates",
   "version": "0.1.0",
   "private": true,
   "description": "Distribution workspace for semantic-gate and quality-check gates.",
@@ -43,7 +43,7 @@
     "quality-gate"
   ],
   "scripts": {
-    "prepare": "npm --prefix semantic-gate install --ignore-scripts --workspaces=false && npm --prefix semantic-gate run build --workspaces=false",
+    "prepare": "npm --prefix semantic-gate install --ignore-scripts --workspaces=false --dry-run=false && npm --prefix semantic-gate run build --workspaces=false",
     "link:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/link-local.ps1",
     "test": "npm run test:semantic && npm run test:quality",
     "test:semantic": "npm --prefix semantic-gate test --workspaces=false",

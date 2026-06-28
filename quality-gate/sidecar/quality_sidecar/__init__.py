@@ -1,4 +1,4 @@
-"""Harness quality-sidecar package."""
+"""Code Approval Gates quality-sidecar package."""
 
 __version__ = "0.1.0"
 
