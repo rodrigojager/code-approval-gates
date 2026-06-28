@@ -1,0 +1,43 @@
+stages:
+  - test
+
+semantic_gate:
+  stage: test
+  image: node:22
+  variables:
+    GIT_DEPTH: "0"
+    CODEX_NON_INTERACTIVE: "1"
+  before_script:
+    - npm install -g semantic-gate
+    - curl -fsSL https://chatgpt.com/codex/install.sh | sh
+    - export PATH="$HOME/.local/bin:$PATH"
+    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+  script:
+    - CODEX_API_KEY="$CODEX_API_KEY" semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --base "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --head "$CI_COMMIT_SHA" --ci --json
+  artifacts:
+    when: always
+    paths:
+      - .quality/semantic-gate/
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+
+quality_gate:
+  stage: test
+  image: docker:28
+  services:
+    - name: docker:28-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - apk add --no-cache nodejs npm
+    - npm install -g quality-check
+  script:
+    - quality-check . --threshold 90 --format=json,md --output .quality/reports
+  artifacts:
+    when: always
+    paths:
+      - .quality/reports/
+  rules:
+    - if: $CI_MERGE_REQUEST_IID

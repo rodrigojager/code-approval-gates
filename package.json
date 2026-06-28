@@ -1,0 +1,56 @@
+{
+  "name": "harness-gates",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Distribution workspace for semantic-gate and quality-check gates.",
+  "bin": {
+    "semantic-gate": "semantic-gate/dist/cli.js",
+    "quality-check": "quality-gate/bin/quality-check.js"
+  },
+  "files": [
+    "README.md",
+    "examples/ci/",
+    "scripts/",
+    "use-semantic-gate/",
+    "use-quality-gate/",
+    "semantic-gate/dist/",
+    "semantic-gate/templates/",
+    "semantic-gate/examples/",
+    "semantic-gate/schemas/",
+    "semantic-gate/README.md",
+    "semantic-gate/LICENSE",
+    "semantic-gate/package.json",
+    "quality-gate/bin/",
+    "quality-gate/docker/",
+    "quality-gate/sidecar/",
+    "quality-gate/examples/",
+    "quality-gate/scripts/",
+    "quality-gate/skill/",
+    "quality-gate/Dockerfile",
+    "quality-gate/.dockerignore",
+    "quality-gate/quality-check.ps1",
+    "quality-gate/quality-gate.txt",
+    "quality-gate/pyproject.toml",
+    "quality-gate/README.md",
+    "quality-gate/LICENSE",
+    "quality-gate/package.json",
+    "!quality-gate/**/__pycache__/**",
+    "!quality-gate/**/*.pyc",
+    "!**/*.pyc"
+  ],
+  "workspaces": [
+    "semantic-gate",
+    "quality-gate"
+  ],
+  "scripts": {
+    "prepare": "npm --prefix semantic-gate install --ignore-scripts --workspaces=false && npm --prefix semantic-gate run build --workspaces=false",
+    "link:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/link-local.ps1",
+    "test": "npm run test:semantic && npm run test:quality",
+    "test:semantic": "npm --prefix semantic-gate test --workspaces=false",
+    "test:quality": "npm --prefix quality-gate test --workspaces=false",
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-all.ps1"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}

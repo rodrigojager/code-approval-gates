@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Semantic Gate"
+  short_description: "Run semantic-gate and fix code until approved."
+  default_prompt: "Run semantic-gate for the current changes, fix issues without lowering the threshold, and repeat until approved."

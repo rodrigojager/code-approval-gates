@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Quality Gate"
+  short_description: "Run quality-check and fix code until approved."
+  default_prompt: "Run quality-check for the current repository, bootstrap it if needed, fix issues without lowering the threshold, and repeat until approved."

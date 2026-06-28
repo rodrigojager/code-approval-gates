@@ -1,0 +1,173 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+
+const CLI = path.resolve("dist/cli.js");
+
+test("semantic-gate run reviews git changes with objective file and mock provider", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-gate-e2e-"));
+  const repo = path.join(temp, "repo");
+  const home = path.join(temp, "home");
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "app.ts"), "export function answer() { return 42; }\n", "utf8");
+  fs.writeFileSync(
+    path.join(temp, "objective.md"),
+    "Implement answer helper with special chars: aspas \" simples ' unicode-like ascii & symbols <> {} []",
+    "utf8",
+  );
+
+  run("git", ["init"], repo);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "run",
+      "--cwd",
+      repo,
+      "--objective-file",
+      path.join(temp, "objective.md"),
+      "--provider",
+      "mock",
+      "--json",
+    ],
+    {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SEMANTIC_GATE_HOME: home,
+      },
+    },
+  );
+
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.gate, "semantic");
+    assert.equal(parsed.status, "APPROVED");
+    assert.equal(parsed.deterministicSummaryUsed, false);
+    assert.equal(parsed.objectiveSource, `file:${path.join(temp, "objective.md")}`);
+    assert.ok(parsed.reports.jsonPath.endsWith(path.join(".quality", "semantic-gate", "semantic-result.json")));
+    assert.equal(fs.existsSync(parsed.reports.jsonPath), true);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("semantic-gate run passes model and reasoning effort to codex-cli provider", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-gate-codex-e2e-"));
+  const repo = path.join(temp, "repo");
+  const home = path.join(temp, "home");
+  const binDir = path.join(temp, "bin");
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1\n", "utf8");
+  fs.writeFileSync(path.join(temp, "objective.md"), "Review the small app change.", "utf8");
+
+  const fakeCodexJs = path.join(binDir, "fake-codex.js");
+  const invocationPath = path.join(temp, "codex-invocation.json");
+  fs.writeFileSync(
+    fakeCodexJs,
+    [
+      "const fs = require('node:fs');",
+      "let input = '';",
+      "process.stdin.setEncoding('utf8');",
+      "process.stdin.on('data', chunk => { input += chunk; });",
+      "process.stdin.on('end', () => {",
+      `  fs.writeFileSync(${JSON.stringify(invocationPath)}, JSON.stringify({ args: process.argv.slice(2), sawPrompt: input.includes('Review the small app change.') }, null, 2));`,
+      "  console.log(JSON.stringify({",
+      "    gate: 'semantic',",
+      "    status: 'APPROVED',",
+      "    score: 100,",
+      "    threshold: 90,",
+      "    deterministicSummaryUsed: false,",
+      "    objectiveSource: 'fake-codex',",
+      "    changesReviewed: 'fake codex review',",
+      "    hardBlockers: [],",
+      "    scoreBreakdown: [",
+      "      { category: 'functional', weight: 25, score: 25, observations: 'ok' },",
+      "      { category: 'tests', weight: 20, score: 20, observations: 'ok' },",
+      "      { category: 'security', weight: 20, score: 20, observations: 'ok' },",
+      "      { category: 'maintainability', weight: 15, score: 15, observations: 'ok' },",
+      "      { category: 'architecture', weight: 10, score: 10, observations: 'ok' },",
+      "      { category: 'performance', weight: 10, score: 10, observations: 'ok' }",
+      "    ],",
+      "    commandsExecuted: [],",
+      "    findings: [],",
+      "    requiredFixPlan: [],",
+      "    rerunCommands: [],",
+      "    approvalNotes: 'ok',",
+      "    residualRisks: [],",
+      "    contextWarnings: []",
+      "  }));",
+      "});",
+    ].join("\n"),
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, "codex.cmd"), `@echo off\r\n"%dp0%\\fake-codex.js" %*\r\n`, "utf8");
+  } else {
+    const codexPath = path.join(binDir, "codex");
+    fs.writeFileSync(codexPath, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeCodexJs)});\n`, "utf8");
+    fs.chmodSync(codexPath, 0o755);
+  }
+
+  run("git", ["init"], repo);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "run",
+      "--cwd",
+      repo,
+      "--objective-file",
+      path.join(temp, "objective.md"),
+      "--provider",
+      "codex-cli",
+      "--model",
+      "gpt-5.5",
+      "--reasoning-effort",
+      "high",
+      "--json",
+    ],
+    {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        Path: `${binDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ""}`,
+        SEMANTIC_GATE_HOME: home,
+      },
+    },
+  );
+
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.status, "APPROVED");
+    const invocation = JSON.parse(fs.readFileSync(invocationPath, "utf8"));
+    assert.deepEqual(invocation.args, [
+      "exec",
+      "-m",
+      "gpt-5.5",
+      "-c",
+      'model_reasoning_effort="high"',
+      "-",
+    ]);
+    assert.equal(invocation.sawPrompt, true);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+function run(command, args, cwd) {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, `${command} ${args.join(" ")}\n${result.stderr}`);
+}
