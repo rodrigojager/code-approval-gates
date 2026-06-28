@@ -78,12 +78,6 @@ npm --prefix .\quality-gate install --workspaces=false
 npm install -g .\quality-gate
 ```
 
-You can also install directly from the Git URL:
-
-```bash
-npm install -g https://github.com/rodrigojager/code-approval-gates.git
-```
-
 The repository root exposes both global binaries:
 
 ```bash
@@ -255,12 +249,6 @@ npm install -g .\semantic-gate
 
 npm --prefix .\quality-gate install --workspaces=false
 npm install -g .\quality-gate
-```
-
-Você também pode instalar diretamente pela URL Git:
-
-```bash
-npm install -g https://github.com/rodrigojager/code-approval-gates.git
 ```
 
 A raiz do repositório expõe os dois binários globais:
