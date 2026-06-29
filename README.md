@@ -51,6 +51,15 @@ quality-check . --threshold 90 --format=json,md --output .quality/reports
 
 For agent workflows, use `use-semantic-gate` first and `use-quality-gate` second. The skills instruct the agent to fix the code in a loop until the gates approve while keeping the same gate configuration.
 
+### Agent Skills
+
+This repository includes two Codex skills for agent-driven workflows:
+
+- `use-semantic-gate`: teaches the agent how to install/bootstrap `semantic-gate` from this repository when the CLI is missing, configure or validate provider/model settings, run the semantic review, read `.quality/semantic-gate` reports, and keep fixing the code until the semantic gate approves.
+- `use-quality-gate`: teaches the agent how to install/bootstrap `quality-check` from this repository when the wrapper is missing, validate Docker/image readiness, run the deterministic quality gate commands, read `.quality/reports`, and keep fixing the code until the quality gate approves.
+
+The skills already know the normal local and CI commands, report paths, exit codes, thresholds, optional checks, and approval criteria. They are intended for compatible agents such as Codex to run the gates, interpret failures, apply fixes, and rerun the same gate configuration without weakening the review.
+
 ### Install From GitHub
 
 Clone the repository and install both global commands from the root:
@@ -223,6 +232,15 @@ quality-check . --threshold 90 --format=json,md --output .quality/reports
 ```
 
 Para fluxos com agentes, use `use-semantic-gate` primeiro e `use-quality-gate` depois. As skills instruem o agente a corrigir o código em loop até os gates aprovarem, mantendo a mesma configuração dos gates.
+
+### Skills Para Agentes
+
+Este repositório inclui duas skills Codex para fluxos conduzidos por agentes:
+
+- `use-semantic-gate`: ensina o agente a instalar/bootstrapar o `semantic-gate` a partir deste repositório quando a CLI estiver ausente, configurar ou validar provider/modelo, rodar a revisão semântica, ler os relatórios em `.quality/semantic-gate` e continuar corrigindo o código até o semantic gate aprovar.
+- `use-quality-gate`: ensina o agente a instalar/bootstrapar o `quality-check` a partir deste repositório quando o wrapper estiver ausente, validar Docker/imagem, rodar os comandos do quality gate determinístico, ler os relatórios em `.quality/reports` e continuar corrigindo o código até o quality gate aprovar.
+
+As skills já conhecem os comandos locais e de CI, caminhos de relatórios, exit codes, thresholds, checks opcionais e critérios de aprovação. Elas foram feitas para agentes compatíveis, como o Codex, rodarem os gates, interpretarem falhas, aplicarem correções e repetirem a mesma configuração do gate sem enfraquecer a revisão.
 
 ### Instalação Pelo GitHub
 
