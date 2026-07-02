@@ -1,43 +1,39 @@
 stages:
   - test
 
-semantic_gate:
+code_approval_gates:
   stage: test
   image: node:22
   variables:
     GIT_DEPTH: "0"
     CODEX_NON_INTERACTIVE: "1"
   before_script:
-    - npm install -g semantic-gate
-    - curl -fsSL https://chatgpt.com/codex/install.sh | sh
-    - export PATH="$HOME/.local/bin:$PATH"
-    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - npm install -g code-approval-gates
   script:
-    - CODEX_API_KEY="$CODEX_API_KEY" semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --base "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --head "$CI_COMMIT_SHA" --ci --json
+    - code-approval-gates doctor --ci --no-interactive
+    - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
   artifacts:
     when: always
     paths:
-      - .quality/semantic-gate/
+      - code-approval-report/
+    expire_in: 14 days
   rules:
-    - if: $CI_MERGE_REQUEST_IID
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
-quality_gate:
+code_approval_full_scan:
   stage: test
-  image: docker:28
-  services:
-    - name: docker:28-dind
-      command: ["--tls=false"]
+  image: node:22
   variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
+    GIT_DEPTH: "0"
+    CODEX_NON_INTERACTIVE: "1"
   before_script:
-    - apk add --no-cache nodejs npm
-    - npm install -g quality-check
+    - npm install -g code-approval-gates
   script:
-    - quality-check . --threshold 90 --format=json,md --output .quality/reports
+    - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
   artifacts:
     when: always
     paths:
-      - .quality/reports/
+      - code-approval-report/
+    expire_in: 30 days
   rules:
-    - if: $CI_MERGE_REQUEST_IID
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'

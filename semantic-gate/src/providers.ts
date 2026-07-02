@@ -92,7 +92,10 @@ function mockProvider(request: ProviderRequest): ProviderResponse {
       commandsExecuted: [],
       findings: [],
       requiredFixPlan: [],
-      rerunCommands: ["semantic-gate run --objective-file <objective-file>", "quality-check ."],
+      rerunCommands: [
+        "code-approval-gates semantic --scope changed --objective-file <objective-file> --json --no-interactive",
+        "code-approval-gates quality --scope changed --json --no-interactive",
+      ],
       approvalNotes: "Mock provider approved the semantic review.",
       residualRisks: [],
       contextWarnings: [],

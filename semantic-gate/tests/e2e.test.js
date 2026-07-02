@@ -50,9 +50,63 @@ test("semantic-gate run reviews git changes with objective file and mock provide
     assert.equal(parsed.gate, "semantic");
     assert.equal(parsed.status, "APPROVED");
     assert.equal(parsed.deterministicSummaryUsed, false);
+    assert.equal(parsed.scoreAppliesTo, "changed-files");
     assert.equal(parsed.objectiveSource, `file:${path.join(temp, "objective.md")}`);
     assert.ok(parsed.reports.jsonPath.endsWith(path.join(".quality", "semantic-gate", "semantic-result.json")));
     assert.equal(fs.existsSync(parsed.reports.jsonPath), true);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("semantic-gate run with no changed files returns approved empty-result payload", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-gate-e2e-empty-"));
+  const repo = path.join(temp, "repo");
+  const home = path.join(temp, "home");
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(temp, "objective.md"), "Validate empty scope behavior.", "utf8");
+
+  run("git", ["init"], repo);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "run",
+      "--cwd",
+      repo,
+      "--objective-file",
+      path.join(temp, "objective.md"),
+      "--provider",
+      "mock",
+      "--scope",
+      "changed",
+      "--json",
+      "--no-interactive",
+    ],
+    {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SEMANTIC_GATE_HOME: home,
+      },
+    },
+  );
+
+  try {
+    assert.equal(result.status, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.gate, "semantic");
+    assert.equal(parsed.status, "APPROVED");
+    assert.equal(parsed.score, 100);
+    assert.equal(parsed.scoreAppliesTo, "changed-files");
+    assert.equal(Array.isArray(parsed.findings), true);
+    assert.equal(parsed.findings.length, 0);
+    assert.equal(parsed.hardBlockers.length, 0);
+    assert.equal(parsed.commandsExecuted.length > 0, true);
+    assert.equal(Array.isArray(parsed.contextWarnings), true);
+    assert.equal(parsed.contextWarnings.some((entry) => String(entry).includes("No files matched scope=changed")), true);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

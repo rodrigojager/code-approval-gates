@@ -1,191 +1,150 @@
 ---
 name: use-semantic-gate
-description: Run the AI semantic-gate before commit, PR, merge, or handoff; interpret its APPROVED, NEEDS_CHANGES, or REJECTED result; and iteratively fix the repository until semantic-gate approves without lowering the threshold, weakening config, switching to mock, or hiding findings.
+description: Run the AI semantic gate through code-approval-gates in headless mode, choose changed/full/paths scope correctly, read semantic reports, and iterate fixes without weakening provider, model, objective, threshold, scope, or baseline rules.
 ---
 
 # Use Semantic Gate
 
-Use this skill to make the AI semantic review pass for the current repository changes. The gate is complementary to deterministic checks: it reviews intent, functional fit, edge cases, tests, maintainability, architecture, and reliability from the changed code and the objective.
+Use this skill when an agent must run the semantic AI review for a repository, interpret the report, and keep the same gate configuration across reruns.
 
-## Agent Operating Contract
+## Default Agent Command
 
-When this skill is selected for a code-improvement task, the agent should keep working in a bounded fix loop until the latest semantic gate run approves, or until the remaining blocker is external and cannot be fixed in the repository.
+Agents should use the unified CLI in headless mode:
 
-The loop is:
+```powershell
+code-approval-gates semantic --scope changed --json --no-interactive --output .quality/reports/latest
+```
 
-1. Run the same semantic gate command with the same objective, provider, model, threshold, and comparison range.
-2. Read `semantic-result.json` or `semantic-result.md`.
-3. Fix concrete blockers in the code, tests, configuration, or documentation without rewriting the objective to fit the implementation.
-4. Re-run the same semantic gate command.
-5. Repeat until approved.
+If the user asks for a full audit:
 
-Do not treat a single failed run as the end of the task. Do not pass by weakening the gate: keep threshold, provider, model, objective, context, and range stable unless the user explicitly changes them.
+```powershell
+code-approval-gates semantic --scope full --format json,md --no-interactive --output .quality/reports/full
+```
 
-## Hard Rules
+If the user asks for specific directories:
 
-- Do not lower `threshold`.
-- Do not switch provider to `mock` for a real approval.
-- Do not edit the objective to make the implemented code look correct.
-- Do not remove tests, validations, logs, error handling, authorization, or security checks just to pass.
-- Do not hide changed files, shrink context limits, disable report writing, or bypass the gate to claim approval.
-- Preserve the same provider, model, threshold, objective, and comparison range across reruns unless the user explicitly asks to change them.
+```powershell
+code-approval-gates semantic --scope paths --path docs --path apps/web --json --no-interactive --output .quality/reports/paths
+```
+
+If the objective is provided in the conversation, pass it through stdin:
+
+```powershell
+"<objective>" | code-approval-gates semantic --scope changed --objective-stdin --json --no-interactive
+```
+
+If the objective is short, passing it directly is also valid:
+
+```powershell
+code-approval-gates semantic --scope changed --objective "Review architecture, quality, and risks" --json --no-interactive
+```
+
+If an objective file exists:
+
+```powershell
+code-approval-gates semantic --scope changed --objective-file .quality/objective.md --json --no-interactive
+```
+
+## Scope Rules
+
+- Use `--scope changed` by default for daily work and merge requests.
+- Use `--scope full` for first audit, baseline, release, or when the user explicitly asks for the whole project.
+- Use `--scope paths` when the user names directories or files.
+- Use `--path` only with `--scope paths`; for `changed` and `full`, filter with `--exclude`, `--include`, or ignore files.
+- Never present a changed-scope score as a full-project score.
+- Always report the scope, `scoreAppliesTo`, and report paths back to the user.
+- Interpret `scoreAppliesTo=changed-files` as a diff/change score, not a whole-project score.
+
+## Ignores
+
+The gate supports gitignore-style files:
+
+```text
+.code-approval-gates.ignore
+.semantic-gate.ignore
+```
+
+Use command-level excludes/includes when the user asks for a temporary filter:
+
+```powershell
+code-approval-gates semantic --scope full --exclude "generated/**" --include "generated/schema.json" --json --no-interactive
+```
+
+## Headless Rules
+
+Agents must prefer:
+
+```powershell
+--json --no-interactive
+```
+
+In CI use:
+
+```powershell
+--ci --no-interactive
+```
+
+Do not open wizard/TUI from an agent unless the user explicitly asks for interactive mode.
+
+Use `--non-blocking` only when the caller wants exit code `0` and will decide approval/failure by reading `summary.json` and `semantic-report.json`.
 
 ## Preflight
 
-Run from the repository root unless the user gives another target.
-
-Check whether the CLI is installed:
-
-```bash
-semantic-gate status
-```
-
-If the command is missing and the local source checkout exists, bootstrap the CLI without changing gate behavior:
+Check readiness:
 
 ```powershell
-Push-Location "C:\path\to\code-approval-gates\semantic-gate"
-npm install --workspaces=false
-npm run build --workspaces=false
+code-approval-gates doctor semantic --json --no-interactive
+```
+
+With explicit user authorization for safe setup fixes:
+
+```powershell
+code-approval-gates doctor semantic --fix --yes --no-interactive
+```
+
+If the unified command is missing but this repository is available, install from the repository root:
+
+```powershell
 npm install -g .
-Pop-Location
-semantic-gate status
 ```
 
-On Linux or macOS, use the same commands from the local `semantic-gate` checkout:
+Provider/model can be set in config or passed explicitly:
 
-```bash
-cd "/path/to/code-approval-gates/semantic-gate"
-npm install --workspaces=false
-npm run build --workspaces=false
-npm install -g .
-semantic-gate status
+```powershell
+code-approval-gates semantic --provider codex-cli --model gpt-5.5 --reasoning-effort high --scope changed --json --no-interactive
 ```
 
-If `semantic-gate status` shows no provider or no model, configure it before running:
+Do not lower the threshold, switch to an easier provider, rewrite the objective, hide files, or remove relevant context to pass.
 
-```bash
-semantic-gate setup
-```
+## Reports
 
-For headless automation, use existing project or global config, or set values explicitly:
-
-```bash
-semantic-gate config set provider <provider>
-semantic-gate config set model <model>
-semantic-gate config set threshold 90
-```
-
-Do not lower an existing threshold.
-
-Supported hosted API credentials include:
-
-- `openrouter`: `OPENROUTER_API_KEY`.
-- `openai`: `OPENAI_API_KEY`.
-- `anthropic`, `claude`, or `claude-api`: `ANTHROPIC_API_KEY`, with `CLAUDE_API_KEY` accepted as a fallback.
-- `opencode-api`: `OPENCODE_API_KEY` plus a configured `baseUrl` for the OpenAI-compatible `/v1` endpoint.
-- `openai-compatible`: `SEMANTIC_GATE_API_KEY` by default, or a custom `apiKeyEnv`.
-
-The `opencode` provider is the local OpenCode CLI preset. Do not confuse it with `opencode-api`; the CLI preset relies on the CLI's own authentication.
-
-For Codex CLI evaluation, the recommended explicit command is:
-
-```bash
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
-```
-
-In CI/CD, provide `CODEX_API_KEY` only to the semantic gate invocation, or use `CODEX_ACCESS_TOKEN` only on trusted Business/Enterprise runners that specifically need ChatGPT workspace identity.
-
-## Objective Input
-
-Always provide the implementation objective. Prefer a file because objectives can be long and contain shell-sensitive characters:
-
-```bash
-semantic-gate run --objective-file .quality/objective.md
-```
-
-If the user provides the objective only in the conversation, create or update `.quality/objective.md` with the user's actual objective before running. Do not rewrite the objective to match the implementation. If the objective is ambiguous enough that approval would be meaningless, ask for clarification before running.
-
-For stdin:
-
-```bash
-semantic-gate run --objective-stdin
-```
-
-For CI or a merge request range:
-
-```bash
-semantic-gate run --objective-file .quality/objective.md --base origin/main --head HEAD --ci --json
-```
-
-## Run And Read The Result
-
-Normal local command:
-
-```bash
-semantic-gate run --objective-file .quality/objective.md
-```
-
-Useful status/config commands:
-
-```bash
-semantic-gate status
-semantic-gate status --json
-semantic-gate models current
-semantic-gate config get
-```
-
-Reports are normally written to:
+Read these first:
 
 ```text
-.quality/semantic-gate/semantic-result.json
-.quality/semantic-gate/semantic-result.md
-.quality/semantic-gate/raw-provider-output.json
+.quality/reports/latest/summary.json
+.quality/reports/latest/summary.md
+.quality/reports/latest/semantic-report.json
+.quality/reports/latest/semantic-report.md
 ```
 
-Interpret exit codes:
+Approval requires:
 
-- `0`: semantic gate approved.
-- `1`: semantic gate returned `REJECTED` or `NEEDS_CHANGES`.
-- `2`: provider, credential, or model error.
-- `3`: usage, objective, Git context, or context-size error.
-
-Interpret the result fields:
-
-- `status`: `APPROVED`, `NEEDS_CHANGES`, or `REJECTED`.
-- `score`: numeric score.
-- `threshold`: minimum required score.
-- `hardBlockers`: approval blockers.
-- `findings`: grouped issues with severity and category.
-- `requiredFixPlan`: the smallest fix plan needed for approval.
-- `contextWarnings`: missing or truncated context that may make the review incomplete.
-
-Approval requires `status=APPROVED`, `score >= threshold`, and no hard blockers.
+- semantic status approved;
+- score greater than or equal to threshold;
+- no hard blockers;
+- scope matches what the user requested;
+- `scoreAppliesTo` matches the scope being summarized.
 
 ## Fix Loop
 
-When status is not approved:
+1. Run the same semantic command with the same objective, provider, model, threshold, scope, paths, ignores, and baseline.
+2. Read `summary.json` and `semantic-report.json`.
+3. Fix concrete blockers without weakening the gate.
+4. Rerun the same command.
+5. Repeat until approved or until the blocker is external.
 
-1. Read `semantic-result.json` first when available, then `semantic-result.md`, then terminal output.
-2. Fix hard blockers before important findings.
-3. Fix issues in this order: correctness, test gaps, security, architecture, maintainability, performance, suggestions.
-4. Make minimal code changes that address the finding's root cause.
-5. Add or update behavior tests when a functional bug, regression, or business-rule gap is identified.
-6. Do not change threshold, provider, model, objective, or comparison range to make the gate pass.
-7. Rerun the same semantic-gate command.
-8. Repeat until approved or until the remaining blocker is external and cannot be solved in the repository.
+When part of a full approval workflow, prefer:
 
-If the provider or credentials fail, fix configuration or report the missing secret. Do not switch to `mock` or another easier provider unless the user explicitly asks.
-
-If context is too large, prefer the configured chunked behavior or raise context limits only when the current model/provider can support it. Do not exclude relevant files to pass.
-
-## Completion Criteria
-
-Only report success when the latest semantic-gate run returns exit code `0` and the result says:
-
-```text
-Status: APPROVED
-Score >= Threshold
-Hard blockers: none
+```powershell
+code-approval-gates run --scope changed --json --no-interactive --output .quality/reports/latest
 ```
-
-When this skill is part of a full approval workflow, run semantic-gate before deterministic `quality-check`, then use the quality-gate skill and require both gates to pass before commit, PR, merge, release, or final handoff.

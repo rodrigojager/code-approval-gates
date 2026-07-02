@@ -1,68 +1,34 @@
 # Code Approval Gates
 
-## 🇺🇸 English
+Code Approval Gates combina um gate deterministico de qualidade (`quality-check`) e um gate semantico com IA (`semantic-gate`) em uma CLI principal: `code-approval-gates`.
 
-Code Approval Gates provides two approval gates for code generated or maintained by humans and AI agents. The goal is to keep code quality above a minimum accepted score before commit, pull request, merge, release, or handoff.
+Code Approval Gates combines a deterministic quality gate (`quality-check`) and an AI semantic gate (`semantic-gate`) behind one main CLI: `code-approval-gates`.
 
-The gates evaluate the repository, produce normalized reports, calculate a score, and return an approval status. A failing result is intended to be actionable: an agent can fix the code and rerun the same gates in a loop until the code reaches the required quality threshold, without lowering thresholds, changing to easier providers, disabling checks, adding silent waivers, or rewriting the objective to fit the implementation.
+---
 
-This repository distributes two independent gates that can be used separately or together:
+## Portugues
 
-- `semantic-gate`: AI semantic review for intent, functional correctness, edge cases, tests, maintainability, architecture, performance, reliability, and contextual risk.
-- `quality-check`: deterministic Docker-based gate for static/tool-backed quality analysis, policy scoring, and normalized reports.
+### O que e
 
-Together, they act like a quality test for AI coding workflows: code is not considered approved until both the semantic review and the deterministic quality check meet the configured minimum score.
+A ferramenta avalia codigo antes de commit, merge request, release ou entrega por agente de IA.
 
-### What The Gates Evaluate
+Ela pode analisar:
 
-`quality-check` evaluates code deterministically through the bundled `code-approval-gates/quality-sidecar`. In full mode it can run:
+- apenas as alteracoes recentes do Git;
+- o projeto inteiro;
+- diretorios ou arquivos especificos.
 
-- MegaLinter.
-- Semgrep.
-- Checkov IaC scanning by default when IaC files are detected.
-- Trivy vulnerability and misconfiguration scanning.
-- OSV-Scanner dependency vulnerability scanning.
-- jscpd duplication detection.
-- Built-in stack and framework detection.
-- Optional project test execution when a supported stack is detected.
-- Optional coverage gate when explicitly enabled, reading existing coverage reports.
-- Built-in policy scoring, severity weighting, thresholds, waivers, and normalized JSON/Markdown reports.
-- Optional PII and secret checks only when explicitly enabled with `--enable-pii` or `--enable-secrets`.
-- Gitleaks and Trivy secret scanning only when secret checks are explicitly enabled.
+O comportamento padrao e rapido:
 
-Checkov runs by default in full mode only when deterministic IaC detection finds files such as Terraform, Kubernetes manifests, Helm charts, Docker/Compose files, CloudFormation templates, Serverless files, or CI workflow configuration. If no IaC files are found, Checkov is reported as skipped and does not reduce the score. Disable this check explicitly with `--disable-iac`.
-
-Coverage is opt-in. When `--enable-coverage` is set, the gate reads existing coverage reports in common formats such as `lcov.info`, Cobertura XML, JaCoCo XML, Clover XML, and Go `coverage.out`. If coverage is enabled and no supported report is found, the gate returns `NEEDS_CHANGES` because the requested evidence is missing.
-
-`semantic-gate` evaluates code semantically through a configured AI provider or local AI CLI. It reviews the current diff, changed files, and objective to judge whether the implementation actually satisfies the requested behavior and whether there are hidden risks deterministic tools do not understand well.
-
-Both gates return machine-usable status and scores:
-
-- `APPROVED`: score is at or above the threshold and no blocker remains.
-- `NEEDS_CHANGES`: analysis was insufficient or a required tool/provider failed.
-- `REJECTED`: code did not meet the configured quality threshold or has an active blocker.
-
-### Recommended Workflow
-
-```text
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
-quality-check . --threshold 90 --format=json,md --output .quality/reports
+```powershell
+code-approval-gates run
 ```
 
-For agent workflows, use `use-semantic-gate` first and `use-quality-gate` second. The skills instruct the agent to fix the code in a loop until the gates approve while keeping the same gate configuration.
+Esse comando usa `--scope changed`, ou seja, analisa apenas o que mudou.
 
-### Agent Skills
+### Instalacao
 
-This repository includes two Codex skills for agent-driven workflows:
-
-- `use-semantic-gate`: teaches the agent how to install/bootstrap `semantic-gate` from this repository when the CLI is missing, configure or validate provider/model settings, run the semantic review, read `.quality/semantic-gate` reports, and keep fixing the code until the semantic gate approves.
-- `use-quality-gate`: teaches the agent how to install/bootstrap `quality-check` from this repository when the wrapper is missing, validate Docker/image readiness, run the deterministic quality gate commands, read `.quality/reports`, and keep fixing the code until the quality gate approves.
-
-The skills already know the normal local and CI commands, report paths, exit codes, thresholds, optional checks, and approval criteria. They are intended for compatible agents such as Codex to run the gates, interpret failures, apply fixes, and rerun the same gate configuration without weakening the review.
-
-### Install From GitHub
-
-Clone the repository and install both global commands from the root:
+A partir deste repositorio:
 
 ```powershell
 git clone https://github.com/rodrigojager/code-approval-gates.git
@@ -70,181 +36,393 @@ cd code-approval-gates
 npm install -g .
 ```
 
-From an existing local checkout, you can use the helper:
+Em desenvolvimento local:
 
 ```powershell
 npm run link:local
 ```
 
-Equivalent per-package development commands:
+Verifique o ambiente:
 
 ```powershell
-npm --prefix .\semantic-gate install --workspaces=false
-npm --prefix .\semantic-gate run build --workspaces=false
-npm install -g .\semantic-gate
-
-npm --prefix .\quality-gate install --workspaces=false
-npm install -g .\quality-gate
+code-approval-gates doctor
 ```
 
-The repository root exposes both global binaries:
-
-```bash
-semantic-gate --help
-quality-check .
-```
-
-### Prerequisites
-
-Semantic gate only:
-
-- Node.js `>=18.17`.
-- A Git repository, because the gate reviews staged, unstaged, untracked, or CI range changes.
-- An objective file, normally `.quality/objective.md`.
-- One configured AI provider and model.
-- Hosted API providers can use provider-specific secrets such as `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`, `GEMINI_API_KEY`, or `OPENCODE_API_KEY`.
-- For `codex-cli`: Codex CLI installed and available as `codex`, plus access to the requested model.
-- For CI/CD with Codex CLI: store a secret such as `CODEX_API_KEY` in the CI secret store and expose it only to the semantic gate command. Use `CODEX_ACCESS_TOKEN` only for trusted Business/Enterprise runners that specifically need ChatGPT workspace identity.
-
-Quality gate only:
-
-- Node.js `>=18`.
-- Docker Desktop or Docker Engine installed, running, and accessible from the shell/runner.
-- Network access on first image build/pull unless the sidecar image is already present.
-- The npm package includes the Docker build context and auto-builds `code-approval-gates/quality-sidecar:latest` when missing.
-- `--mode quick` and `--mode offline` are development-only partial modes. Do not use them to claim full gate approval.
-- Checkov IaC scanning is enabled by default in full mode and can be disabled with `--disable-iac`.
-- Coverage thresholds are disabled by default and must be enabled with `--enable-coverage`.
-
-Both gates:
-
-- Keep `.quality/objective.md` in the target repository for semantic review.
-- Publish `.quality/semantic-gate` and `.quality/reports` as CI artifacts.
-- Use exit codes to fail PR/MR pipelines automatically.
-- Run `semantic-gate` before `quality-check` when you want the AI review to catch semantic gaps before deterministic analysis.
-
-### Local Usage
-
-Run semantic review with Codex CLI:
+Se quiser criar arquivos padrao de configuracao e ignore:
 
 ```powershell
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
+code-approval-gates init
 ```
 
-Run deterministic quality:
+O repositorio tambem inclui `.code-approval-gates.example.json` como referencia versionada. Nao e necessario renomear esse exemplo manualmente; `code-approval-gates init` cria `.code-approval-gates.json`. Em execucao, flags da linha de comando sobrescrevem a configuracao do arquivo.
+
+Consultar ou alterar configuracao:
 
 ```powershell
-quality-check . --threshold 90 --format=json,md --output .quality/reports
-quality-check . --threshold 90 --enable-coverage --min-line-coverage 80 --format=json,md --output .quality/reports
-quality-check . --threshold 90 --disable-iac --format=json,md --output .quality/reports
+code-approval-gates config get
+code-approval-gates config set defaultScope full
+code-approval-gates config set baseline.path .quality/baseline/baseline.json
 ```
 
-Run both manually:
+Valores como `true`, `false` e numeros sao interpretados automaticamente quando possivel.
+Tambem e possivel manter defaults de `paths`, `excludes`, `includes` e `ignoreFiles` em `.code-approval-gates.json`. `paths` so e usado quando o escopo efetivo e `paths`; excludes/includes/ignoreFiles podem complementar qualquer escopo. Flags de linha de comando podem complementar esses filtros para uma execucao especifica.
+
+### Primeiro uso local
+
+Modo facil, com wizard/TUI quando o terminal for interativo:
 
 ```powershell
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
-quality-check . --threshold 90 --format=json,md --output .quality/reports
+code-approval-gates
 ```
 
-### CI/CD
+O wizard permite escolher a acao (run, quality, semantic, baseline, report, config ou doctor), os gates para run, o escopo (`changed`, `full` ou `paths`), paths especificos, excludes/includes temporarios, ignore files extras, provider/modelo do Semantic Gate quando necessario, arquivos de saida do baseline e modo de correcao do Doctor.
+Para baseline, o wizard sugere `full`; para analises do dia a dia, sugere `changed`.
 
-Templates are in `examples/ci/`:
+Modo direto:
 
-- `gitlab-semantic-gate-codex-cli.yml`
-- `gitlab-quality-gate.yml`
-- `gitlab-both-gates.yml`
-- `github-actions-both-gates.yml`
+```powershell
+code-approval-gates run
+```
 
-CI rules:
+Modo headless para IA, scripts ou CI:
 
-- Use `GIT_DEPTH: "0"` or fetch the target branch for semantic diffs.
-- Keep `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`, `OPENCODE_API_KEY`, and other provider secrets masked/protected.
-- Do not set model-provider secrets job-wide in jobs that run untrusted repository code before the gate command.
-- Publish reports as artifacts with `when: always`.
-- Let non-zero exit codes fail the PR/MR.
+```powershell
+code-approval-gates run --scope changed --json --no-interactive --output .quality/reports/latest
+```
 
-### Repository Layout
+`--ci`, `--json` e `--no-interactive` nunca abrem wizard/TUI, mesmo se `--interactive` tambem for informado. Para IA, scripts e pipelines, sempre prefira comandos completos com flags explicitas.
+Para ajuda parseavel por automacao, use `code-approval-gates help run --json --no-interactive`.
+
+Use `--non-blocking` quando o pipeline ou agente deve receber exit code `0` e ler aprovacao/reprovacao pelos relatorios gerados.
+
+Use `--cwd <dir>` quando a ferramenta for executada de fora da raiz do projeto analisado.
+
+### Tipos de analise
+
+Analise rapida das alteracoes Git:
+
+```powershell
+code-approval-gates run --scope changed
+```
+
+Analise de um range especifico:
+
+```powershell
+code-approval-gates run --scope changed --base origin/main --head HEAD
+```
+
+Analise completa do projeto:
+
+```powershell
+code-approval-gates run --scope full
+```
+
+Analise por diretorios:
+
+```powershell
+code-approval-gates run --scope paths --path apps/web --path packages/core
+```
+
+`--path` exige `--scope paths`. Para `changed` e `full`, use `--exclude`, `--include` ou arquivos de ignore para filtrar.
+
+Todo relatorio declara `scoreAppliesTo`. Use esse campo para interpretar a pontuacao:
+
+- `changed-files`: score das alteracoes recentes.
+- `entire-project`: score do projeto inteiro.
+- `selected-paths`: score dos arquivos/diretorios selecionados.
+
+Nao apresente um score de `changed-files` como se fosse score do projeto inteiro.
+
+Rodar somente o Quality Gate:
+
+```powershell
+code-approval-gates quality --scope changed
+code-approval-gates run --gate quality --scope changed
+```
+
+Rodar somente o Semantic Gate:
+
+```powershell
+code-approval-gates semantic --scope changed --objective-file .quality/objective.md
+```
+
+O caminho de `--objective-file` e relativo ao diretorio do projeto analisado.
+
+Objetivo semantico direto:
+
+```powershell
+code-approval-gates semantic --scope changed --objective "Avaliar arquitetura, qualidade e riscos"
+code-approval-gates run --gate semantic --scope changed --objective "Avaliar arquitetura, qualidade e riscos"
+```
+
+Objetivo semantico via stdin:
+
+```powershell
+"Avaliar arquitetura, qualidade e riscos" | code-approval-gates semantic --scope full --objective-stdin --json --no-interactive
+```
+
+### Ignorando arquivos e diretorios
+
+A ferramenta usa ignores em estilo `.gitignore`.
+
+Arquivos suportados:
 
 ```text
-semantic-gate/      AI semantic review CLI package
-quality-gate/       deterministic Docker quality-check package
-use-semantic-gate/  Codex skill for semantic gate fix loops
-use-quality-gate/   Codex skill for quality gate fix loops
-examples/ci/        GitLab and GitHub Actions templates
-scripts/            local linking and verification helpers
+.code-approval-gates.ignore
+.quality-gate.ignore
+.semantic-gate.ignore
 ```
 
-### Verify This Workspace
+O repositorio ja traz esses arquivos como templates. Em projetos consumidores, `code-approval-gates init` tambem cria os mesmos arquivos quando eles ainda nao existem.
+
+Exemplo `.code-approval-gates.ignore`:
+
+```gitignore
+node_modules/
+dist/
+build/
+coverage/
+.quality/
+*.log
+*.sqlite
+*.db
+!generated/schema.json
+```
+
+Tambem e possivel passar ignores por comando:
+
+```powershell
+code-approval-gates run --scope full --exclude "generated/**" --exclude "projects/**/artifacts/**"
+```
+
+E re-incluir algo especifico:
+
+```powershell
+code-approval-gates run --scope full --exclude "projects/**/artifacts/**" --include "projects/demo/artifacts/schema.json"
+```
+
+### Baseline
+
+Use baseline para separar problemas antigos de problemas novos.
+
+No comando `baseline create`, `--output` aponta para o arquivo JSON do baseline. O diretorio do scan fonte fica em `--report-output`.
+
+Criar baseline usando o scan fonte padrao, gerando esse scan se ainda nao existir:
+
+```powershell
+code-approval-gates baseline create --output .quality/baseline/baseline.json
+```
+
+Criar baseline fazendo um scan completo antes:
+
+```powershell
+code-approval-gates baseline create --scope full --output .quality/baseline/baseline.json --report-output .quality/reports/baseline-source
+```
+
+Quando o baseline gerar o scan fonte, voce tambem pode passar `--provider`, `--model`, `--reasoning-effort`, `--objective`, `--objective-file` ou `--objective-stdin` para manter o Semantic Gate alinhado com a analise desejada.
+Essas flags semanticas sao ignoradas quando `--no-semantic` e usado.
+
+Use `--no-semantic` ou `--no-quality` apenas quando quiser excluir um dos gates do baseline. Pelo menos um gate precisa continuar ativo.
+
+Criar baseline a partir de um relatorio existente:
+
+```powershell
+code-approval-gates baseline create --from-report .quality/reports/full/summary.json --output .quality/baseline/baseline.json
+```
+
+Usar baseline no dia a dia:
+
+```powershell
+code-approval-gates run --scope changed --baseline .quality/baseline/baseline.json
+```
+
+Checar baseline:
+
+```powershell
+code-approval-gates baseline check --baseline .quality/baseline/baseline.json
+```
+
+Se `.code-approval-gates.json` definir `baseline.path`, `baseline create` e `baseline check` usam esse caminho quando `--output` ou `--baseline` nao forem informados.
+
+O comando `run` so usa baseline quando `--baseline <path>` e passado explicitamente.
+
+### Doctor
+
+Diagnostico simples:
+
+```powershell
+code-approval-gates doctor
+```
+
+Diagnostico com JSON para IA/CI:
+
+```powershell
+code-approval-gates doctor --json --no-interactive
+```
+
+Diagnostico por area:
+
+```powershell
+code-approval-gates doctor quality
+code-approval-gates doctor semantic
+code-approval-gates doctor gitlab
+```
+
+Criar arquivos seguros que faltam:
+
+```powershell
+code-approval-gates doctor --fix --yes
+```
+
+Reinstalar o pacote globalmente de forma explicita:
+
+```powershell
+code-approval-gates doctor --install-global
+```
+
+O `doctor --fix` pode criar configuracao, ignores padrao, diretorios de relatorio, instalar dependencias locais do Semantic Gate quando faltarem e preparar artefatos locais necessarios. Ele nao deve salvar segredo no repositorio, apagar codigo, fazer commit ou push.
+Ele tambem nao instala o pacote globalmente, exceto quando `--install-global` for passado explicitamente. Em terminal interativo, `--fix` e `--install-global` sem `--yes` pedem confirmacao antes de alterar o ambiente. Use `--yes` para deixar a intencao explicita em scripts, CI e execucoes headless.
+
+### Relatorios
+
+Ler resumo de um relatorio existente:
+
+```powershell
+code-approval-gates report summary --report-dir .quality/reports/latest
+code-approval-gates report path --report-dir .quality/reports/latest
+```
+
+Padrao local:
+
+```text
+.quality/reports/latest/summary.json
+.quality/reports/latest/summary.md
+.quality/reports/latest/quality-report.json
+.quality/reports/latest/quality-report.md
+.quality/reports/latest/semantic-report.json
+.quality/reports/latest/semantic-report.md
+.quality/reports/latest/quality-scope.json
+.quality/reports/latest/raw/
+```
+
+Ver o resumo:
+
+```powershell
+code-approval-gates report summary
+```
+
+### GitLab CI
+
+Em pipelines consumidores, rode `code-approval-gates`. Reserve `npm run verify` para validar este repositorio antes de release/publicacao.
+
+Merge request, analisando apenas alteracoes:
+
+```yaml
+code_approval_gates:
+  image: node:22
+  stage: test
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - npm install -g code-approval-gates
+  script:
+    - code-approval-gates doctor --ci --no-interactive
+    - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
+  artifacts:
+    when: always
+    paths:
+      - code-approval-report/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+```
+
+Scan completo agendado:
+
+```yaml
+code_approval_full_scan:
+  image: node:22
+  stage: test
+  before_script:
+    - npm install -g code-approval-gates
+  script:
+    - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
+  artifacts:
+    when: always
+    paths:
+      - code-approval-report/
+    expire_in: 30 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+```
+
+### Binarios diretos avancados
+
+O pacote ainda publica `quality-check` e `semantic-gate` para uso avancado e compatibilidade. Para usuario, IA e CI, prefira `code-approval-gates`, porque ele padroniza escopo, ignores, baseline, doctor, wizard e relatorios em um unico contrato.
+
+### Help
+
+```powershell
+code-approval-gates --help
+code-approval-gates wizard --help
+code-approval-gates run --help
+code-approval-gates quality --help
+code-approval-gates semantic --help
+code-approval-gates baseline --help
+code-approval-gates baseline create --help
+code-approval-gates baseline check --help
+code-approval-gates report --help
+code-approval-gates report summary --help
+code-approval-gates report path --help
+code-approval-gates doctor --help
+code-approval-gates doctor quality --help
+code-approval-gates doctor semantic --help
+code-approval-gates doctor gitlab --help
+code-approval-gates init --help
+code-approval-gates config --help
+code-approval-gates config get --help
+code-approval-gates config set --help
+code-approval-gates config path --help
+code-approval-gates version
+code-approval-gates help run
+```
+
+### Validacao local do repositorio
+
+Para validar o pacote completo antes de publicar ou usar em CI:
 
 ```powershell
 npm run verify
 ```
 
-This runs package tests and dry-run packaging checks for both gates. Docker image smoke checks remain available inside `quality-gate/scripts/`.
+Esse comando faz checagens de sintaxe, testes raiz, build/test do Semantic Gate, testes do Quality Gate e `npm pack --dry-run`.
+Use `npm test` para o conjunto de testes sobre os artefatos ja gerados; use `npm run verify` antes de release, CI ou publicacao.
 
-## 🇧🇷 Português
+---
 
-Code Approval Gates fornece dois gates de aprovação para código gerado ou mantido por pessoas e agentes de IA. O objetivo é manter a qualidade do código acima de uma pontuação mínima aceita antes de commit, pull request, merge, release ou entrega.
+## English
 
-Os gates avaliam o repositório, geram relatórios normalizados, calculam uma pontuação e retornam um status de aprovação. Um resultado reprovado deve ser acionável: um agente pode corrigir o código e rodar os mesmos gates em loop até atingir o limite mínimo de qualidade, sem reduzir thresholds, trocar para providers mais fáceis, desabilitar checks, adicionar waivers silenciosos ou reescrever o objetivo para combinar com a implementação.
+### What it is
 
-Este repositório distribui dois gates independentes que podem ser usados separadamente ou em conjunto:
+This tool evaluates code before commit, merge request, release, or AI-agent handoff.
 
-- `semantic-gate`: revisão semântica por IA para intenção, correção funcional, casos de borda, testes, manutenibilidade, arquitetura, performance, confiabilidade e risco contextual.
-- `quality-check`: gate determinístico baseado em Docker para análise estática/com ferramentas, pontuação por política e relatórios normalizados.
+It can analyze:
 
-Juntos, eles funcionam como um teste de qualidade para fluxos de programação com IA: o código não deve ser considerado aprovado até que a revisão semântica e o quality gate determinístico atinjam a pontuação mínima configurada.
+- recent Git changes only;
+- the whole project;
+- specific directories or files.
 
-### O Que Os Gates Avaliam
+The default behavior is fast:
 
-O `quality-check` avalia o código de forma determinística usando o `code-approval-gates/quality-sidecar` embarcado. Em modo full, ele pode executar:
-
-- MegaLinter.
-- Semgrep.
-- Checkov para IaC por padrão quando arquivos de IaC são detectados.
-- Trivy para vulnerabilidades e misconfigurations.
-- OSV-Scanner para vulnerabilidades em dependências.
-- jscpd para detecção de duplicação.
-- Detecção interna de stack e framework.
-- Execução opcional de testes do projeto quando uma stack suportada é detectada.
-- Gate opcional de coverage quando explicitamente habilitado, lendo relatórios de cobertura existentes.
-- Pontuação por política, peso por severidade, thresholds, waivers e relatórios normalizados em JSON/Markdown.
-- Checks opcionais de PII e secrets somente quando explicitamente habilitados com `--enable-pii` ou `--enable-secrets`.
-- Gitleaks e secret scanning do Trivy somente quando checks de secrets são explicitamente habilitados.
-
-Checkov roda por padrão em modo full somente quando a detecção determinística de IaC encontra arquivos como Terraform, manifests Kubernetes, charts Helm, Docker/Compose, templates CloudFormation, Serverless ou workflows de CI. Se nenhum arquivo de IaC for encontrado, Checkov aparece como skipped e não reduz o score. Desabilite explicitamente com `--disable-iac`.
-
-Coverage é opt-in. Quando `--enable-coverage` é usado, o gate lê relatórios de cobertura existentes em formatos comuns como `lcov.info`, Cobertura XML, JaCoCo XML, Clover XML e Go `coverage.out`. Se coverage for habilitado e nenhum relatório suportado for encontrado, o gate retorna `NEEDS_CHANGES` porque a evidência solicitada está ausente.
-
-O `semantic-gate` avalia o código semanticamente usando um provider de IA configurado ou uma CLI local de IA. Ele revisa o diff atual, arquivos alterados e objetivo para julgar se a implementação realmente atende ao comportamento solicitado e se existem riscos ocultos que ferramentas determinísticas não entendem bem.
-
-Ambos retornam status e pontuação utilizáveis por automação:
-
-- `APPROVED`: score no mínimo igual ao threshold e sem blocker ativo.
-- `NEEDS_CHANGES`: análise insuficiente ou falha em ferramenta/provider necessário.
-- `REJECTED`: código abaixo do threshold configurado ou com blocker ativo.
-
-### Fluxo Recomendado
-
-```text
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
-quality-check . --threshold 90 --format=json,md --output .quality/reports
+```powershell
+code-approval-gates run
 ```
 
-Para fluxos com agentes, use `use-semantic-gate` primeiro e `use-quality-gate` depois. As skills instruem o agente a corrigir o código em loop até os gates aprovarem, mantendo a mesma configuração dos gates.
+That command uses `--scope changed`, which means it analyzes only what changed.
 
-### Skills Para Agentes
+### Installation
 
-Este repositório inclui duas skills Codex para fluxos conduzidos por agentes:
-
-- `use-semantic-gate`: ensina o agente a instalar/bootstrapar o `semantic-gate` a partir deste repositório quando a CLI estiver ausente, configurar ou validar provider/modelo, rodar a revisão semântica, ler os relatórios em `.quality/semantic-gate` e continuar corrigindo o código até o semantic gate aprovar.
-- `use-quality-gate`: ensina o agente a instalar/bootstrapar o `quality-check` a partir deste repositório quando o wrapper estiver ausente, validar Docker/imagem, rodar os comandos do quality gate determinístico, ler os relatórios em `.quality/reports` e continuar corrigindo o código até o quality gate aprovar.
-
-As skills já conhecem os comandos locais e de CI, caminhos de relatórios, exit codes, thresholds, checks opcionais e critérios de aprovação. Elas foram feitas para agentes compatíveis, como o Codex, rodarem os gates, interpretarem falhas, aplicarem correções e repetirem a mesma configuração do gate sem enfraquecer a revisão.
-
-### Instalação Pelo GitHub
-
-Clone o repositório e instale os dois comandos globais pela raiz:
+From this repository:
 
 ```powershell
 git clone https://github.com/rodrigojager/code-approval-gates.git
@@ -252,114 +430,381 @@ cd code-approval-gates
 npm install -g .
 ```
 
-Em um checkout local existente, você pode usar o helper:
+For local development:
 
 ```powershell
 npm run link:local
 ```
 
-Comandos equivalentes por pacote durante desenvolvimento:
+Check the environment:
 
 ```powershell
-npm --prefix .\semantic-gate install --workspaces=false
-npm --prefix .\semantic-gate run build --workspaces=false
-npm install -g .\semantic-gate
-
-npm --prefix .\quality-gate install --workspaces=false
-npm install -g .\quality-gate
+code-approval-gates doctor
 ```
 
-A raiz do repositório expõe os dois binários globais:
-
-```bash
-semantic-gate --help
-quality-check .
-```
-
-### Pré-Requisitos
-
-Somente semantic gate:
-
-- Node.js `>=18.17`.
-- Um repositório Git, porque o gate revisa mudanças staged, unstaged, untracked ou ranges de CI.
-- Um arquivo de objetivo, normalmente `.quality/objective.md`.
-- Um provider de IA e modelo configurados.
-- Providers de API hospedados podem usar secrets específicos como `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`, `GEMINI_API_KEY` ou `OPENCODE_API_KEY`.
-- Para `codex-cli`: Codex CLI instalado e disponível como `codex`, além de acesso ao modelo solicitado.
-- Para CI/CD com Codex CLI: armazene um secret como `CODEX_API_KEY` no cofre de secrets do CI e exponha somente para o comando do semantic gate. Use `CODEX_ACCESS_TOKEN` apenas em runners Business/Enterprise confiáveis que realmente precisem de identidade de workspace ChatGPT.
-
-Somente quality gate:
-
-- Node.js `>=18`.
-- Docker Desktop ou Docker Engine instalado, rodando e acessível pelo shell/runner.
-- Acesso à rede no primeiro build/pull da imagem, salvo se a imagem do sidecar já estiver presente.
-- O pacote npm inclui o contexto de build Docker e constrói automaticamente `code-approval-gates/quality-sidecar:latest` quando a imagem estiver ausente.
-- `--mode quick` e `--mode offline` são modos parciais para desenvolvimento. Não use esses modos para declarar aprovação completa.
-- Checkov para IaC fica habilitado por padrão em modo full e pode ser desabilitado com `--disable-iac`.
-- Thresholds de coverage ficam desabilitados por padrão e precisam ser habilitados com `--enable-coverage`.
-
-Ambos os gates:
-
-- Mantenha `.quality/objective.md` no repositório alvo para a revisão semântica.
-- Publique `.quality/semantic-gate` e `.quality/reports` como artefatos de CI.
-- Use exit codes para reprovar pipelines de PR/MR automaticamente.
-- Rode `semantic-gate` antes de `quality-check` quando quiser que a revisão por IA encontre lacunas semânticas antes da análise determinística.
-
-### Uso Local
-
-Rodar revisão semântica com Codex CLI:
+Create default config and ignore files:
 
 ```powershell
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
+code-approval-gates init
 ```
 
-Rodar qualidade determinística:
+The repository also includes `.code-approval-gates.example.json` as a versioned reference. You do not need to rename that example manually; `code-approval-gates init` creates `.code-approval-gates.json`. At runtime, command-line flags override file configuration.
+
+Read or change configuration:
 
 ```powershell
-quality-check . --threshold 90 --format=json,md --output .quality/reports
-quality-check . --threshold 90 --enable-coverage --min-line-coverage 80 --format=json,md --output .quality/reports
-quality-check . --threshold 90 --disable-iac --format=json,md --output .quality/reports
+code-approval-gates config get
+code-approval-gates config set defaultScope full
+code-approval-gates config set baseline.path .quality/baseline/baseline.json
 ```
 
-Rodar ambos manualmente:
+Values such as `true`, `false`, and numbers are parsed automatically when possible.
+You can also keep `paths`, `excludes`, `includes`, and `ignoreFiles` defaults in `.code-approval-gates.json`. `paths` is used only when the effective scope is `paths`; excludes/includes/ignoreFiles can complement any scope. Command-line flags can complement those filters for a specific run.
+
+### First local run
+
+Easy mode, with wizard/TUI when the terminal is interactive:
 
 ```powershell
-semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --json
-quality-check . --threshold 90 --format=json,md --output .quality/reports
+code-approval-gates
 ```
 
-### CI/CD
+The wizard lets you choose the action (run, quality, semantic, baseline, report, config, or doctor), run gates, scope (`changed`, `full`, or `paths`), specific paths, temporary excludes/includes, extra ignore files, the Semantic Gate provider/model when needed, baseline output files, and Doctor fix mode.
+For baseline, the wizard suggests `full`; for daily analysis, it suggests `changed`.
 
-Templates estão em `examples/ci/`:
+Direct mode:
 
-- `gitlab-semantic-gate-codex-cli.yml`
-- `gitlab-quality-gate.yml`
-- `gitlab-both-gates.yml`
-- `github-actions-both-gates.yml`
+```powershell
+code-approval-gates run
+```
 
-Regras de CI:
+Headless mode for AI, scripts, or CI:
 
-- Use `GIT_DEPTH: "0"` ou faça fetch do branch alvo para diffs semânticos.
-- Mantenha `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`, `OPENCODE_API_KEY` e outros secrets de provider mascarados/protegidos.
-- Não configure secrets de provider globalmente em jobs que executam código não confiável do repositório antes do comando do gate.
-- Publique relatórios como artefatos com `when: always`.
-- Deixe exit codes diferentes de zero reprovarem o PR/MR.
+```powershell
+code-approval-gates run --scope changed --json --no-interactive --output .quality/reports/latest
+```
 
-### Estrutura Do Repositório
+`--ci`, `--json`, and `--no-interactive` never open the wizard/TUI, even if `--interactive` is also passed. For AI, scripts, and pipelines, always prefer complete commands with explicit flags.
+For automation-parseable help, use `code-approval-gates help run --json --no-interactive`.
+
+Use `--non-blocking` when the pipeline or agent should receive exit code `0` and read approval/failure from the generated reports.
+
+Use `--cwd <dir>` when the tool runs outside the analyzed project root.
+
+### Analysis types
+
+Quick analysis of Git changes:
+
+```powershell
+code-approval-gates run --scope changed
+```
+
+Specific Git range:
+
+```powershell
+code-approval-gates run --scope changed --base origin/main --head HEAD
+```
+
+Full project scan:
+
+```powershell
+code-approval-gates run --scope full
+```
+
+Directory-based scan:
+
+```powershell
+code-approval-gates run --scope paths --path apps/web --path packages/core
+```
+
+`--path` requires `--scope paths`. For `changed` and `full`, use `--exclude`, `--include`, or ignore files to filter.
+
+Every report declares `scoreAppliesTo`. Use that field to interpret the score:
+
+- `changed-files`: score for recent changes.
+- `entire-project`: score for the whole project.
+- `selected-paths`: score for the selected files/directories.
+
+Do not present a `changed-files` score as a whole-project score.
+
+Run only Quality Gate:
+
+```powershell
+code-approval-gates quality --scope changed
+code-approval-gates run --gate quality --scope changed
+```
+
+Run only Semantic Gate:
+
+```powershell
+code-approval-gates semantic --scope changed --objective-file .quality/objective.md
+```
+
+The `--objective-file` path is relative to the analyzed project directory.
+
+Direct semantic objective:
+
+```powershell
+code-approval-gates semantic --scope changed --objective "Review architecture, quality, and risks"
+code-approval-gates run --gate semantic --scope changed --objective "Review architecture, quality, and risks"
+```
+
+Semantic objective through stdin:
+
+```powershell
+"Review architecture, quality, and risks" | code-approval-gates semantic --scope full --objective-stdin --json --no-interactive
+```
+
+### Ignoring files and directories
+
+The tool supports gitignore-style ignore files.
+
+Supported files:
 
 ```text
-semantic-gate/      pacote CLI da revisão semântica por IA
-quality-gate/       pacote Docker determinístico quality-check
-use-semantic-gate/  skill Codex para loops do semantic gate
-use-quality-gate/   skill Codex para loops do quality gate
-examples/ci/        templates para GitLab e GitHub Actions
-scripts/            helpers de link local e verificação
+.code-approval-gates.ignore
+.quality-gate.ignore
+.semantic-gate.ignore
 ```
 
-### Verificar Este Workspace
+This repository ships those files as templates. In consumer projects, `code-approval-gates init` also creates the same files when they do not exist yet.
+
+Example `.code-approval-gates.ignore`:
+
+```gitignore
+node_modules/
+dist/
+build/
+coverage/
+.quality/
+*.log
+*.sqlite
+*.db
+!generated/schema.json
+```
+
+CLI excludes:
+
+```powershell
+code-approval-gates run --scope full --exclude "generated/**" --exclude "projects/**/artifacts/**"
+```
+
+Re-include a specific file:
+
+```powershell
+code-approval-gates run --scope full --exclude "projects/**/artifacts/**" --include "projects/demo/artifacts/schema.json"
+```
+
+### Baseline
+
+Use baseline to separate old debt from new problems.
+
+In `baseline create`, `--output` points to the baseline JSON file. The source scan directory is controlled by `--report-output`.
+
+Create baseline using the default source scan, generating that scan if it does not exist yet:
+
+```powershell
+code-approval-gates baseline create --output .quality/baseline/baseline.json
+```
+
+Create baseline after running a full source scan:
+
+```powershell
+code-approval-gates baseline create --scope full --output .quality/baseline/baseline.json --report-output .quality/reports/baseline-source
+```
+
+When baseline creates the source scan, you can also pass `--provider`, `--model`, `--reasoning-effort`, `--objective`, `--objective-file`, or `--objective-stdin` to keep the Semantic Gate aligned with the intended review.
+Those semantic flags are ignored when `--no-semantic` is used.
+
+Use `--no-semantic` or `--no-quality` only when you want to exclude one gate from the baseline. At least one gate must remain enabled.
+
+Create baseline from an existing report:
+
+```powershell
+code-approval-gates baseline create --from-report .quality/reports/full/summary.json --output .quality/baseline/baseline.json
+```
+
+Use baseline in daily runs:
+
+```powershell
+code-approval-gates run --scope changed --baseline .quality/baseline/baseline.json
+```
+
+Check baseline:
+
+```powershell
+code-approval-gates baseline check --baseline .quality/baseline/baseline.json
+```
+
+If `.code-approval-gates.json` defines `baseline.path`, `baseline create` and `baseline check` use that path when `--output` or `--baseline` are not provided.
+
+The `run` command only uses a baseline when `--baseline <path>` is passed explicitly.
+
+### Doctor
+
+Human-readable diagnostics:
+
+```powershell
+code-approval-gates doctor
+```
+
+JSON diagnostics for AI/CI:
+
+```powershell
+code-approval-gates doctor --json --no-interactive
+```
+
+Area-specific diagnostics:
+
+```powershell
+code-approval-gates doctor quality
+code-approval-gates doctor semantic
+code-approval-gates doctor gitlab
+```
+
+Create safe missing files:
+
+```powershell
+code-approval-gates doctor --fix --yes
+```
+
+Explicitly reinstall the package globally:
+
+```powershell
+code-approval-gates doctor --install-global
+```
+
+`doctor --fix` may create config, default ignores, report directories, install missing local Semantic Gate dependencies, and prepare required local artifacts. It must not save secrets into the repository, delete code, commit, or push.
+It also does not install the package globally unless `--install-global` is passed explicitly. In an interactive terminal, `--fix` and `--install-global` without `--yes` ask for confirmation before changing the environment. Use `--yes` to make the intent explicit in scripts, CI, and headless runs.
+
+### Reports
+
+Read an existing report summary:
+
+```powershell
+code-approval-gates report summary --report-dir .quality/reports/latest
+code-approval-gates report path --report-dir .quality/reports/latest
+```
+
+Default local layout:
+
+```text
+.quality/reports/latest/summary.json
+.quality/reports/latest/summary.md
+.quality/reports/latest/quality-report.json
+.quality/reports/latest/quality-report.md
+.quality/reports/latest/semantic-report.json
+.quality/reports/latest/semantic-report.md
+.quality/reports/latest/quality-scope.json
+.quality/reports/latest/raw/
+```
+
+Read the summary:
+
+```powershell
+code-approval-gates report summary
+```
+
+### GitLab CI
+
+In consumer pipelines, run `code-approval-gates`. Reserve `npm run verify` for validating this repository before release/publishing.
+
+Merge request, analyzing changed files only:
+
+```yaml
+code_approval_gates:
+  image: node:22
+  stage: test
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - npm install -g code-approval-gates
+  script:
+    - code-approval-gates doctor --ci --no-interactive
+    - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
+  artifacts:
+    when: always
+    paths:
+      - code-approval-report/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+```
+
+Scheduled full scan:
+
+```yaml
+code_approval_full_scan:
+  image: node:22
+  stage: test
+  before_script:
+    - npm install -g code-approval-gates
+  script:
+    - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
+  artifacts:
+    when: always
+    paths:
+      - code-approval-report/
+    expire_in: 30 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+```
+
+### Advanced direct binaries
+
+The package still publishes `quality-check` and `semantic-gate` for advanced usage and compatibility. For users, agents, and CI, prefer `code-approval-gates` because it standardizes scope, ignores, baseline, doctor, wizard, and reports behind one contract.
+
+### Help
+
+```powershell
+code-approval-gates --help
+code-approval-gates wizard --help
+code-approval-gates run --help
+code-approval-gates quality --help
+code-approval-gates semantic --help
+code-approval-gates baseline --help
+code-approval-gates baseline create --help
+code-approval-gates baseline check --help
+code-approval-gates report --help
+code-approval-gates report summary --help
+code-approval-gates report path --help
+code-approval-gates doctor --help
+code-approval-gates doctor quality --help
+code-approval-gates doctor semantic --help
+code-approval-gates doctor gitlab --help
+code-approval-gates init --help
+code-approval-gates config --help
+code-approval-gates config get --help
+code-approval-gates config set --help
+code-approval-gates config path --help
+code-approval-gates version
+code-approval-gates help run
+```
+
+### Local repository validation
+
+To validate the full package before publishing or using it in CI:
 
 ```powershell
 npm run verify
 ```
 
-Esse comando roda os testes dos pacotes e checagens de empacotamento dry-run dos dois gates. Smoke checks de imagem Docker continuam disponíveis dentro de `quality-gate/scripts/`.
+This command runs syntax checks, root tests, Semantic Gate build/test, Quality Gate tests, and `npm pack --dry-run`.
+Use `npm test` for the test set over already generated artifacts; use `npm run verify` before release, CI, or publishing.
+
+---
+
+## Advanced legacy binaries
+
+The package still exposes lower-level binaries for advanced use:
+
+```powershell
+quality-check . --scope changed --threshold 90 --format=json,md --output .quality/reports
+quality-check . --scope full --threshold 90 --format=json,md --output .quality/reports/full
+semantic-gate run --scope changed --objective-file .quality/objective.md --json
+semantic-gate run --scope full --objective-file .quality/objective.md --json
+```
+
+Prefer `code-approval-gates` for new workflows.
+
+

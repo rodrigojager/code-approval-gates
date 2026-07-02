@@ -1,4 +1,4 @@
 interface:
   display_name: "Use Quality Gate"
-  short_description: "Run quality-check and fix code until approved."
-  default_prompt: "Run quality-check for the current repository, bootstrap it if needed, fix issues without lowering the threshold, and repeat until approved."
+  short_description: "Run code-approval-gates quality in headless mode and fix code until approved."
+  default_prompt: "Run code-approval-gates quality --scope changed --json --no-interactive for the current repository, run code-approval-gates doctor quality --json --no-interactive if setup is uncertain, use doctor quality --fix --yes --no-interactive only with explicit user authorization, fix issues without lowering the threshold, and repeat until approved."

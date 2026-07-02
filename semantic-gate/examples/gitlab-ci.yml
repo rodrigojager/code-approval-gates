@@ -5,13 +5,14 @@ semantic_gate:
     GIT_DEPTH: "0"
     CODEX_NON_INTERACTIVE: "1"
   before_script:
-    - npm install -g semantic-gate
-    - curl -fsSL https://chatgpt.com/codex/install.sh | sh
-    - export PATH="$HOME/.local/bin:$PATH"
-    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - npm install -g code-approval-gates
   script:
-    - CODEX_API_KEY="$CODEX_API_KEY" semantic-gate run --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --base "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --head "$CI_COMMIT_SHA" --ci --json
+    - code-approval-gates doctor semantic --ci --no-interactive
+    - code-approval-gates semantic --ci --scope changed --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --format json,md --output code-approval-report --no-interactive
   artifacts:
     when: always
     paths:
-      - .quality/semantic-gate/
+      - code-approval-report/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

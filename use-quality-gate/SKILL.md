@@ -1,172 +1,127 @@
 ---
 name: use-quality-gate
-description: Run the deterministic quality-check quality gate before commit, PR, merge, release, or handoff; bootstrap the local wrapper when missing; interpret JSON and Markdown reports; and iteratively fix the repository until quality-check approves without lowering the threshold, relaxing the profile, adding waivers, or disabling checks.
+description: Run the deterministic Quality Gate through code-approval-gates in headless mode, choose changed/full/paths scope correctly, read reports, and iterate fixes without weakening threshold, profile, checks, ignores, baseline, or scope.
 ---
 
 # Use Quality Gate
 
-Use this skill to make the deterministic `quality-check` gate pass for the current repository. This gate runs the Docker-based quality sidecar and deterministic tools. It does not use an LLM.
+Use this skill when an agent must run deterministic quality checks, interpret the normalized reports, and keep the same gate configuration across reruns.
 
-## Agent Operating Contract
+## Default Agent Command
 
-When this skill is selected for a code-improvement task, the agent should keep working in a bounded fix loop until the latest full `quality-check` run approves, or until the remaining blocker is external and cannot be fixed in the repository.
+Agents should use the unified CLI in headless mode:
 
-The loop is:
+```powershell
+code-approval-gates quality --scope changed --json --no-interactive --output .quality/reports/latest
+```
 
-1. Run the same full quality gate command.
-2. Read the report and identify concrete blockers.
-3. Modify the code, tests, configuration, or documentation to address the root cause.
-4. Re-run the same gate command.
-5. Repeat until approved.
+If the user asks for a full scan:
 
-Do not treat a single failed run as the end of the task. Do not pass by weakening the gate: keep the threshold, profile, enabled checks, target, output path, image, and mode stable unless the user explicitly changes them.
+```powershell
+code-approval-gates quality --scope full --format json,md --no-interactive --output .quality/reports/full
+```
 
-## Hard Rules
+If the user asks for specific directories:
 
-- Do not lower `threshold`.
-- Do not switch to `--profile relaxed` to pass unless the user explicitly requested that profile before the run.
-- Do not use `--allow-*`, `--allow-rule`, `--allow-path`, or `--waiver` to hide real findings unless the user explicitly approves that exact waiver.
-- Do not use `--mode quick` or `--mode offline` to claim full approval. Those are partial development modes only.
-- Do not disable PII or secret checks after the user or project enabled them.
-- Do not disable default IaC scanning with `--disable-iac` or `--no-iac` unless the user or repository policy explicitly asks for it.
-- Do not remove `--enable-coverage` or lower coverage thresholds after the user or project enabled coverage.
-- Do not remove tests, validations, logs, error handling, authorization, or security checks just to pass.
-- Preserve the same threshold, profile, enabled optional checks, target, output path, and image across reruns unless the user explicitly changes them.
+```powershell
+code-approval-gates quality --scope paths --path docs --path apps/web --json --no-interactive --output .quality/reports/paths
+```
+
+## Scope Rules
+
+- Use `--scope changed` by default for daily work and merge requests.
+- Use `--scope full` for first audit, baseline, release, or when the user explicitly asks for the whole project.
+- Use `--scope paths` when the user names directories or files.
+- Use `--path` only with `--scope paths`; for `changed` and `full`, filter with `--exclude`, `--include`, or ignore files.
+- Never present a changed-scope score as a full-project score.
+- Always report the scope, `scoreAppliesTo`, and report paths back to the user.
+- Interpret `scoreAppliesTo=changed-files` as a diff/change score, not a whole-project score.
+
+## Ignores
+
+The gate supports gitignore-style files:
+
+```text
+.code-approval-gates.ignore
+.quality-gate.ignore
+```
+
+CLI excludes and includes are also supported:
+
+```powershell
+code-approval-gates quality --scope full --exclude "generated/**" --include "generated/schema.json" --json --no-interactive
+```
+
+## Headless Rules
+
+Agents must prefer:
+
+```powershell
+--json --no-interactive
+```
+
+In CI use:
+
+```powershell
+--ci --no-interactive
+```
+
+Do not open wizard/TUI from an agent unless the user explicitly asks for interactive mode.
+
+Use `--non-blocking` only when the caller wants exit code `0` and will decide approval/failure by reading `summary.json` and `quality-report.json`.
 
 ## Preflight
 
-Run from the repository root unless the user gives another target.
-
-Check whether the wrapper is installed:
+Check readiness:
 
 ```powershell
-Get-Command quality-check -ErrorAction SilentlyContinue
+code-approval-gates doctor quality --json --no-interactive
 ```
 
-```bash
-command -v quality-check
-```
-
-If `quality-check` is missing and the local quality-gate checkout exists, bootstrap the wrapper:
+With explicit user authorization for safe setup fixes:
 
 ```powershell
-Push-Location "C:\path\to\code-approval-gates\quality-gate"
-npm install --workspaces=false
+code-approval-gates doctor quality --fix --yes --no-interactive
+```
+
+If the unified command is missing but this repository is available, install from the repository root:
+
+```powershell
 npm install -g .
-Pop-Location
-Get-Command quality-check -ErrorAction SilentlyContinue
 ```
 
-On Linux or macOS, use the same commands from the local `quality-gate` checkout:
+If Docker is unavailable, report the blocker. Do not use quick/offline mode as a substitute for full approval unless the user explicitly asks for a partial development check.
 
-```bash
-cd "/path/to/code-approval-gates/quality-gate"
-npm install --workspaces=false
-npm install -g .
-command -v quality-check
-```
+## Reports
 
-If Docker is not installed, not running, or inaccessible, `quality-check` exits with operational failure. Start Docker or report the blocker. Do not use quick/offline mode as a substitute for full approval.
-
-If the Docker image is missing or stale and Docker is available, initialize or refresh it with:
-
-```bash
-quality-check . --pull --format=json,md
-```
-
-## Run Command
-
-Use the repository's required threshold when known. Otherwise use the default or user-specified threshold, commonly `90`:
-
-```bash
-quality-check . --threshold 90 --format=json,md --output .quality/reports
-```
-
-If the project already has a required profile or optional deterministic checks, keep them on every rerun:
-
-```bash
-quality-check . --threshold 90 --profile strict --format=json,md --output .quality/reports
-quality-check . --threshold 90 --enable-secrets --format=json,md --output .quality/reports
-quality-check . --threshold 90 --enable-pii --format=json,md --output .quality/reports
-quality-check . --threshold 90 --enable-coverage --min-line-coverage 80 --format=json,md --output .quality/reports
-```
-
-PII and secret checks are optional. Enable them only when requested by the user, CI, repository policy, or prior gate command.
-
-IaC scanning is enabled by default in full mode. Checkov runs only when deterministic detection finds IaC files such as Terraform, Kubernetes manifests, Helm charts, Docker/Compose files, CloudFormation/SAM templates, Serverless files, GitHub Actions, GitLab CI, or Azure Pipelines. If no IaC files are detected, the Checkov tool result is skipped and must not be treated as a blocker. Do not add `--disable-iac` or `--no-iac` unless the user explicitly requested it.
-
-Coverage is opt-in. Use `--enable-coverage` only when requested by the user, CI, repository policy, or prior gate command. Expected report formats include:
-
-- LCOV: `coverage/lcov.info` or `lcov.info`.
-- Cobertura XML: `coverage.xml`, `coverage/coverage.xml`, `coverage.cobertura.xml`.
-- JaCoCo XML: `target/site/jacoco/jacoco.xml` or `build/reports/jacoco/test/jacocoTestReport.xml`.
-- Clover XML: `clover.xml` or `coverage/clover.xml`.
-- Go coverprofile: `coverage.out`.
-
-When coverage is enabled and no supported report exists, fix the project test/coverage command so it generates one of those reports. Do not bypass the coverage gate by disabling it.
-
-For debugging only:
-
-```bash
-quality-check . --threshold 90 --format=json,md --debug-docker
-```
-
-Do not treat a debug command as approval unless it runs the full gate and returns approved.
-
-## Read The Result
-
-Reports are normally written to:
+Read these first:
 
 ```text
-.quality/reports/quality-report.json
-.quality/reports/quality-report.md
-.quality/reports/raw/
+.quality/reports/latest/summary.json
+.quality/reports/latest/summary.md
+.quality/reports/latest/quality-report.json
+.quality/reports/latest/quality-report.md
+.quality/reports/latest/raw/
 ```
 
-Interpret exit codes:
+Approval requires:
 
-- `0`: approved.
-- `1`: rejected by the quality gate.
-- `2`: needs changes or human review because analysis was insufficient or a relevant tool failed.
-- `3`: local or operational failure, such as Docker not found or inaccessible.
-
-Read `quality-report.json` first when available, then `quality-report.md`, then terminal output. Extract:
-
-- overall status.
-- score and threshold.
-- blocking findings.
-- failed tools or incomplete analyses.
-- file paths and line numbers.
-- required fixes or categories.
-
-Approval requires exit code `0`, report status approved, score at or above threshold, and no active blockers.
+- quality status approved;
+- score greater than or equal to threshold;
+- no active blockers;
+- scope matches what the user requested;
+- `scoreAppliesTo` matches the scope being summarized.
 
 ## Fix Loop
 
-When the gate does not approve:
+1. Run the same quality command with the same threshold, profile, scope, paths, ignores, optional checks, and baseline.
+2. Read `summary.json` and `quality-report.json`.
+3. Fix concrete blockers without weakening the gate.
+4. Rerun the same command.
+5. Repeat until approved or until the blocker is external.
 
-1. If exit code is `3`, fix the operational problem first: missing wrapper, Docker unavailable, image missing, mount problem, or permissions.
-2. If reports exist, inspect `quality-report.json` and `quality-report.md`.
-3. Fix deterministic blockers before warnings or suggestions.
-4. Fix issues in this order: build/test/lint/type failures, security vulnerabilities, IaC findings, coverage findings when enabled, secrets/PII findings when enabled, dependency problems, duplication, maintainability, formatting.
-5. Prefer root-cause fixes over suppressions.
-6. Add or update tests when the finding reveals a functional regression or missing coverage.
-7. Do not lower threshold, change to relaxed profile, add waivers, disable default IaC scanning, disable optional checks that were enabled, lower coverage thresholds, or switch to partial modes to pass.
-8. Rerun the exact same quality-check command.
-9. Repeat until approved or until the remaining blocker is external and cannot be solved in the repository.
+When part of a full approval workflow, prefer:
 
-If a finding is a false positive, document why and request explicit user approval before using `--allow-rule`, `--allow-path`, or a waiver file. Never add a waiver silently.
-
-If Docker cannot be started in the current environment, say the gate is not complete and provide the exact command to rerun once Docker is available.
-
-## Completion Criteria
-
-Only report success when the latest full quality-check run returns exit code `0` and the report confirms approval:
-
-```text
-Status: approved
-Score >= Threshold
-No active blockers
+```powershell
+code-approval-gates run --scope changed --json --no-interactive --output .quality/reports/latest
 ```
-
-When this skill is part of a full approval workflow, run it after the semantic-gate skill. Commit, PR, merge, release, or final handoff only after both semantic-gate and quality-check approve.

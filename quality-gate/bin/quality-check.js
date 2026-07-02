@@ -7,6 +7,37 @@ const path = require("node:path");
 
 const DEFAULT_IMAGE = "code-approval-gates/quality-sidecar:latest";
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
+const DEFAULT_IGNORES = [
+  ".git/",
+  ".quality/",
+  "node_modules/",
+  "dist/",
+  "build/",
+  "coverage/",
+  ".turbo/",
+  ".vite/",
+  "__pycache__/",
+  "*.pyc",
+  "*.pyo",
+  "*.log",
+  "*.sqlite",
+  "*.sqlite3",
+  "*.db"
+];
+const SUPPORT_FILES = [
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "tsconfig.json",
+  "pyproject.toml",
+  "requirements.txt",
+  "Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  ".gitignore",
+  "README.md"
+];
 
 function takeValue(raw, index, flag, options = {}) {
   const value = raw[index + 1];
@@ -29,6 +60,16 @@ function parseArgs(rawArgs, env = process.env) {
     noPull: false,
     build: env.QUALITY_CHECK_AUTO_BUILD !== "0" && env.QUALITY_CHECK_NO_BUILD !== "1",
     debugDocker: false,
+    help: false,
+    scope: env.QUALITY_CHECK_SCOPE || "changed",
+    paths: [],
+    excludes: [],
+    includes: [],
+    ignoreFiles: [],
+    json: false,
+    ci: false,
+    noInteractive: false,
+    output: env.QUALITY_CHECK_OUTPUT || ".quality/reports",
     dockerArgs: [],
     containerArgs: []
   };
@@ -39,6 +80,82 @@ function parseArgs(rawArgs, env = process.env) {
 
   for (let i = 0; i < raw.length; i += 1) {
     const arg = raw[i];
+
+    if (arg === "--help" || arg === "-h") {
+      parsed.help = true;
+      continue;
+    }
+
+    if (arg === "--scope") {
+      parsed.scope = takeValue(raw, i, arg);
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--scope=")) {
+      parsed.scope = arg.slice("--scope=".length);
+      continue;
+    }
+
+    if (arg === "--path") {
+      parsed.paths.push(takeValue(raw, i, arg));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--path=")) {
+      parsed.paths.push(arg.slice("--path=".length));
+      continue;
+    }
+
+    if (arg === "--exclude") {
+      parsed.excludes.push(takeValue(raw, i, arg));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--exclude=")) {
+      parsed.excludes.push(arg.slice("--exclude=".length));
+      continue;
+    }
+
+    if (arg === "--include") {
+      parsed.includes.push(takeValue(raw, i, arg));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--include=")) {
+      parsed.includes.push(arg.slice("--include=".length));
+      continue;
+    }
+
+    if (arg === "--ignore-file") {
+      parsed.ignoreFiles.push(takeValue(raw, i, arg));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--ignore-file=")) {
+      parsed.ignoreFiles.push(arg.slice("--ignore-file=".length));
+      continue;
+    }
+
+    if (arg === "--ci") {
+      parsed.ci = true;
+      parsed.noInteractive = true;
+      continue;
+    }
+
+    if (arg === "--no-interactive") {
+      parsed.noInteractive = true;
+      continue;
+    }
+
+    if (arg === "--json") {
+      parsed.json = true;
+      continue;
+    }
 
     if (arg === "--image" || arg === "-Image" || arg === "-image") {
       parsed.image = takeValue(raw, i, arg);
@@ -98,14 +215,41 @@ function parseArgs(rawArgs, env = process.env) {
       continue;
     }
 
+    if (arg === "--output") {
+      parsed.output = takeValue(raw, i, arg);
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--output=")) {
+      parsed.output = arg.slice("--output=".length);
+      continue;
+    }
+
     parsed.containerArgs.push(arg);
   }
 
   if (parsed.pull && parsed.noPull) {
     parsed.pull = false;
   }
+  if (!["changed", "full", "paths"].includes(parsed.scope)) {
+    throw new Error("--scope must be changed, full, or paths");
+  }
+  if (parsed.scope !== "paths" && parsed.paths.length > 0) {
+    throw new Error("--path can only be used with --scope paths");
+  }
+  if (parsed.scope === "paths" && parsed.paths.length === 0) {
+    throw new Error("--scope paths requires at least one --path");
+  }
+  if (parsed.json && !hasContainerFormat(parsed.containerArgs)) {
+    parsed.containerArgs.push("--format", "json");
+  }
 
   return parsed;
+}
+
+function hasContainerFormat(args) {
+  return args.some((arg) => arg === "--format" || String(arg).startsWith("--format="));
 }
 
 function ensureTarget(target) {
@@ -120,8 +264,8 @@ function ensureTarget(target) {
   return targetPath;
 }
 
-function buildDockerArgs(parsed, targetPath) {
-  const reportsPath = path.join(targetPath, ".quality", "reports");
+function buildDockerArgs(parsed, targetPath, reportsPath = path.join(targetPath, ".quality", "reports")) {
+  const containerArgs = withoutOutputArgs(parsed.containerArgs);
   return [
     "run",
     "--rm",
@@ -135,8 +279,26 @@ function buildDockerArgs(parsed, targetPath) {
     parsed.image,
     "check",
     "/workspace",
-    ...parsed.containerArgs
+    "--output",
+    ".quality/reports",
+    ...containerArgs
   ];
+}
+
+function withoutOutputArgs(args) {
+  const result = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--output") {
+      index += 1;
+      continue;
+    }
+    if (String(arg).startsWith("--output=")) {
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
 }
 
 function quoteForDisplay(value) {
@@ -148,6 +310,226 @@ function quoteForDisplay(value) {
 
 function commandLine(command, args) {
   return [command, ...args].map(quoteForDisplay).join(" ");
+}
+
+function resolveScopedTarget(targetPath, parsed) {
+  const reportsPath = path.isAbsolute(parsed.output)
+    ? parsed.output
+    : path.resolve(targetPath, parsed.output);
+  const selected = resolveScopeFiles(targetPath, parsed);
+  if (parsed.scope === "full" && selected.ignoredCount === 0 && parsed.excludes.length === 0 && parsed.includes.length === 0 && parsed.ignoreFiles.length === 0) {
+    return { effectiveTarget: targetPath, reportsPath, scope: selected };
+  }
+  const projectionRoot = path.join(targetPath, ".quality", "scopes", `quality-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const effectiveTarget = path.join(projectionRoot, "workspace");
+  fs.mkdirSync(effectiveTarget, { recursive: true });
+  for (const file of selected.files) {
+    const source = path.join(targetPath, file);
+    const destination = path.join(effectiveTarget, file);
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) {
+      continue;
+    }
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
+  }
+  return { effectiveTarget, reportsPath, scope: selected };
+}
+
+function resolveScopeFiles(targetPath, parsed) {
+  const ignorePlan = loadIgnorePlan(targetPath, parsed);
+  let files = [];
+  const commands = [];
+
+  if (parsed.scope === "changed") {
+    const range = resolveGitRange();
+    if (range.base || range.head) {
+      const args = ["diff", "--name-only", `${range.base || "HEAD"}...${range.head || "HEAD"}`];
+      const result = runCaptured("git", args, targetPath);
+      commands.push(recordCommand("git", args, result));
+      files.push(...splitLines(result.stdout));
+    } else {
+      for (const args of [["diff", "--name-only"], ["diff", "--cached", "--name-only"], ["ls-files", "--others", "--exclude-standard"]]) {
+        const result = runCaptured("git", args, targetPath);
+        commands.push(recordCommand("git", args, result));
+        files.push(...splitLines(result.stdout));
+      }
+    }
+    files = filterToConfiguredPaths(files, parsed.paths);
+  } else if (parsed.scope === "full") {
+    const args = ["ls-files", "-co", "--exclude-standard"];
+    const result = runCaptured("git", args, targetPath);
+    commands.push(recordCommand("git", args, result));
+    files = result.status === 0 ? splitLines(result.stdout) : walkFiles(targetPath).map((file) => normalizePath(path.relative(targetPath, file)));
+  } else {
+    for (const selectedPath of parsed.paths) {
+      const normalized = normalizePath(selectedPath);
+      const args = ["ls-files", "-co", "--exclude-standard", "--", normalized];
+      const result = runCaptured("git", args, targetPath);
+      commands.push(recordCommand("git", args, result));
+      files.push(...(result.status === 0 ? splitLines(result.stdout) : walkFiles(path.join(targetPath, normalized)).map((file) => normalizePath(path.relative(targetPath, file)))));
+    }
+  }
+
+  if (parsed.scope === "full" || (parsed.scope === "changed" && files.length > 0)) {
+    for (const support of SUPPORT_FILES) {
+      if (fs.existsSync(path.join(targetPath, support))) {
+        files.push(support);
+      }
+    }
+  }
+  const unique = [...new Set(files.map(normalizePath).filter(Boolean))];
+  const filtered = unique
+    .filter((file) => fs.existsSync(path.join(targetPath, file)) && fs.statSync(path.join(targetPath, file)).isFile())
+    .filter((file) => !isIgnored(file, ignorePlan));
+  return {
+    scope: parsed.scope,
+    files: filtered.sort(),
+    fileCount: filtered.length,
+    ignoredCount: unique.length - filtered.length,
+    ignoreFiles: ignorePlan.files,
+    commands
+  };
+}
+
+function resolveGitRange() {
+  if (process.env.GITLAB_CI && process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME) {
+    return { base: `origin/${process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME}`, head: process.env.CI_COMMIT_SHA || "HEAD" };
+  }
+  if (process.env.GITHUB_BASE_REF) {
+    return { base: `origin/${process.env.GITHUB_BASE_REF}`, head: process.env.GITHUB_SHA || "HEAD" };
+  }
+  return {};
+}
+
+function loadIgnorePlan(targetPath, parsed) {
+  const rules = DEFAULT_IGNORES.map((pattern) => ({ pattern, include: false, source: "defaults" }));
+  const files = [];
+  const candidates = [...new Set([".gitignore", ".code-approval-gates.ignore", ".quality-gate.ignore", ...parsed.ignoreFiles])];
+  for (const candidate of candidates) {
+    const relative = normalizePath(candidate);
+    const absolute = path.resolve(targetPath, relative);
+    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
+      continue;
+    }
+    files.push(relative);
+    for (const rawLine of fs.readFileSync(absolute, "utf8").split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) {
+        continue;
+      }
+      const include = line.startsWith("!");
+      rules.push({ pattern: include ? line.slice(1) : line, include, source: relative });
+    }
+  }
+  for (const pattern of parsed.excludes) {
+    rules.push({ pattern, include: false, source: "--exclude" });
+  }
+  for (const pattern of parsed.includes) {
+    rules.push({ pattern, include: true, source: "--include" });
+  }
+  return { files, rules };
+}
+
+function isIgnored(file, ignorePlan) {
+  let ignored = false;
+  for (const rule of ignorePlan.rules) {
+    if (matchesPattern(file, rule.pattern)) {
+      ignored = !rule.include;
+    }
+  }
+  return ignored;
+}
+
+function filterToConfiguredPaths(files, configuredPaths) {
+  if (!configuredPaths.length) {
+    return files;
+  }
+  const prefixes = configuredPaths.map(normalizePath).filter(Boolean);
+  return files.filter((file) => {
+    const normalized = normalizePath(file);
+    return prefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+  });
+}
+
+function runCaptured(command, args, cwd) {
+  return spawnSync(command, args, { cwd, encoding: "utf8", errors: "replace", timeout: 30000 });
+}
+
+function recordCommand(command, args, result) {
+  return { command: commandLine(command, args), exitCode: result.status ?? null };
+}
+
+function splitLines(text) {
+  return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function normalizePath(value) {
+  return String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+}
+
+function walkFiles(root) {
+  if (!fs.existsSync(root)) {
+    return [];
+  }
+  if (fs.statSync(root).isFile()) {
+    return [root];
+  }
+  const files = [];
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if ([".git", "node_modules", ".quality"].includes(entry.name)) {
+          continue;
+        }
+        stack.push(full);
+      } else if (entry.isFile()) {
+        files.push(full);
+      }
+    }
+  }
+  return files;
+}
+
+function matchesPattern(file, pattern) {
+  const normalizedFile = normalizePath(file);
+  const normalizedPattern = normalizePath(pattern);
+  if (!normalizedPattern) {
+    return false;
+  }
+  if (normalizedPattern.endsWith("/")) {
+    const prefix = normalizedPattern.replace(/\/+$/, "");
+    return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`) || normalizedFile.includes(`/${prefix}/`);
+  }
+  if (!normalizedPattern.includes("/")) {
+    return normalizedFile.split("/").some((part) => globRegex(normalizedPattern).test(part));
+  }
+  return globRegex(normalizedPattern).test(normalizedFile);
+}
+
+function globRegex(pattern) {
+  let out = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+    if (char === "*" && next === "*") {
+      out += ".*";
+      index += 1;
+    } else if (char === "*") {
+      out += "[^/]*";
+    } else if (char === "?") {
+      out += "[^/]";
+    } else {
+      out += escapeRegex(char);
+    }
+  }
+  return new RegExp(`${out}$`);
+}
+
+function escapeRegex(value) {
+  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
 }
 
 function isDockerAvailable(env = process.env, runner = spawnSync) {
@@ -199,20 +581,131 @@ function buildBundledImage(image, env = process.env, runner = spawnSync, package
   return result.status ?? 3;
 }
 
+function helpText() {
+  return `quality-check
+
+Usage:
+  quality-check
+  quality-check --scope changed
+  quality-check --scope full
+  quality-check --scope paths --path apps/web --path packages/core
+  quality-check . --threshold 90 --format=json,md --output .quality/reports
+
+Scope flags:
+  --scope changed|full|paths     changed is the default.
+  --path <path>                  Add a path for scope=paths; repeatable.
+  --exclude <glob>               Exclude files using gitignore-style globs; repeatable.
+  --include <glob>               Re-include a previously excluded file; repeatable.
+  --ignore-file <path>           Add a custom gitignore-style ignore file; repeatable; supports !path re-inclusion.
+
+Automation:
+  --ci                           Headless CI mode.
+  --json                         Request JSON report format.
+  --no-interactive               Never prompt.
+
+Docker wrapper flags:
+  --image <image>
+  --pull / --no-pull
+  --build / --no-build
+  --docker-arg <arg>
+  --debug-docker
+
+All remaining flags are passed to the sidecar check command.
+`;
+}
+
+function writeEmptyQualityReport(reportsPath, scope, parsed) {
+  fs.mkdirSync(reportsPath, { recursive: true });
+  const report = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    target: parsed.target,
+    status: "APPROVED",
+    exitCode: 0,
+    profile: "standard",
+    mode: "scoped",
+    score: { value: 100, threshold: 0, max: 100 },
+    scope,
+    scoreAppliesTo: scoreAppliesToForScope(scope.scope),
+    summary: {
+      counts: { active: 0, allowed: 0, total: 0 },
+      reasons: ["No files matched the requested scope after ignore rules."],
+      toolErrors: []
+    },
+    stack: {},
+    tools: [],
+    findings: []
+  };
+  fs.writeFileSync(path.join(reportsPath, "quality-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(reportsPath, "quality-report.md"),
+    `# Quality Gate Report\n\nStatus: APPROVED\nScope: ${scope.scope}\nFiles analyzed: 0\n\nNo files matched the requested scope after ignore rules.\n`,
+    "utf8"
+  );
+}
+
+function scoreAppliesToForScope(scope) {
+  return scope === "full" ? "entire-project" : scope === "paths" ? "selected-paths" : "changed-files";
+}
+
+function augmentQualityReports(reportsPath, scope, parsed) {
+  const jsonPath = path.join(reportsPath, "quality-report.json");
+  const markdownPath = path.join(reportsPath, "quality-report.md");
+  if (fs.existsSync(jsonPath)) {
+    try {
+      const report = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+      report.scope = scope;
+      report.scoreAppliesTo = scoreAppliesToForScope(scope.scope);
+      fs.writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+    } catch {
+      // Keep the original report if augmentation fails.
+    }
+  }
+  if (fs.existsSync(markdownPath)) {
+    const addition = [
+      "",
+      "## Scope",
+      "",
+      `Scope: ${scope.scope}`,
+      `Files analyzed: ${scope.fileCount}`,
+      `Ignored files: ${scope.ignoredCount}`,
+      `Ignore files: ${scope.ignoreFiles.length ? scope.ignoreFiles.join(", ") : "(none)"}`,
+      "",
+    ].join("\n");
+    fs.appendFileSync(markdownPath, addition, "utf8");
+  }
+}
+
 function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync) {
   let parsed;
   let targetPath;
 
   try {
     parsed = parseArgs(rawArgs, env);
+    if (parsed.help) {
+      console.log(helpText());
+      return 0;
+    }
     targetPath = ensureTarget(parsed.target);
   } catch (error) {
     console.error(error.message);
     return 3;
   }
 
-  const reportsPath = path.join(targetPath, ".quality", "reports");
+  const scopedTarget = resolveScopedTarget(targetPath, parsed);
+  const reportsPath = scopedTarget.reportsPath;
   fs.mkdirSync(reportsPath, { recursive: true });
+  fs.writeFileSync(
+    path.join(reportsPath, "quality-scope.json"),
+    `${JSON.stringify(scopedTarget.scope, null, 2)}\n`,
+    "utf8"
+  );
+
+  if (scopedTarget.scope.files.length === 0) {
+    writeEmptyQualityReport(reportsPath, scopedTarget.scope, parsed);
+    console.error("No files matched the requested quality-check scope after ignore rules.");
+    return 0;
+  }
 
   if (!isDockerAvailable(env, runner)) {
     console.error(
@@ -239,7 +732,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync) {
     }
   }
 
-  const dockerArgs = buildDockerArgs(parsed, targetPath);
+  const dockerArgs = buildDockerArgs(parsed, scopedTarget.effectiveTarget, reportsPath);
   if (parsed.debugDocker) {
     console.log(commandLine("docker", dockerArgs));
   }
@@ -250,6 +743,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync) {
     return 3;
   }
 
+  augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
   return result.status ?? 3;
 }
 
@@ -269,6 +763,13 @@ module.exports = {
   imageExists,
   canBuildBundledImage,
   buildBundledImage,
+  helpText,
+  resolveScopeFiles,
+  resolveScopedTarget,
+  matchesPattern,
+  augmentQualityReports,
+  writeEmptyQualityReport,
   normalizeFormatValue,
   runDockerWrapper
 };
+

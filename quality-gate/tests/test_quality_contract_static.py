@@ -68,45 +68,39 @@ class StaticQualityGateContractTests(unittest.TestCase):
         package = json.loads(read("package.json"))
 
         self.assertEqual(package["bin"]["quality-check"], "bin/quality-check.js")
-        for required in ["Dockerfile", "docker/", "sidecar/", "pyproject.toml", "bin/", "quality-check.ps1"]:
+        for required in ["Dockerfile", "docker/", "sidecar/", "pyproject.toml", "bin/", "quality-check.ps1", "tests/"]:
             self.assertIn(required, package["files"])
 
     def test_documentation_keeps_container_first_contract(self) -> None:
         readme = read("README.md")
-        forbidden_claims = [
-            "quality-check . pode rodar nativamente por padrão",
-            "--engine auto tenta Docker",
-        ]
 
-        self.assertIn("quality-check .", readme)
-        self.assertIn("runs Docker by default", readme)
-        self.assertIn("--enable-pii", readme)
-        self.assertIn("--enable-secrets", readme)
-        self.assertIn("--disable-iac", readme)
-        self.assertIn("--enable-coverage", readme)
-        self.assertIn("Local native fallback is not used silently", readme)
-        for claim in forbidden_claims:
-            self.assertNotIn(claim, readme)
+        self.assertIn("code-approval-gates quality --scope changed", readme)
+        self.assertIn("code-approval-gates quality --scope full", readme)
+        self.assertIn("code-approval-gates quality --scope paths", readme)
+        self.assertIn("quality-check . --scope changed", readme)
+        self.assertIn("Prefer `code-approval-gates quality`", readme)
+        self.assertIn("headless `--json --no-interactive` mode for agents", readme)
+        self.assertIn("gitignore-style `!path` re-inclusion", readme)
+        self.assertIn("baseline support", readme)
 
     def test_complementary_skill_does_not_duplicate_deterministic_checks_or_privacy_scans(self) -> None:
         skill = read("skill/quality-gate.md")
-        forbidden = [
-            "npm test",
-            "Gitleaks",
-            "Trivy",
-            "OSV-Scanner",
-            "Segredo hardcoded",
-            "CPF",
-        ]
 
         self.assertIn("Complementary Semantic Quality Review", skill)
-        self.assertIn("Do not inspect, infer, request, or classify secrets or PII", skill)
-        self.assertIn("Do not use the deterministic quality gate summary as input", skill)
-        self.assertIn("git diff --cached", skill)
-        self.assertIn("Gate: Complementary Semantic Review", skill)
+        self.assertIn("code-approval-gates semantic --scope changed", skill)
+        self.assertIn("--objective \"Review architecture, quality, and risks\"", skill)
+        self.assertIn("code-approval-gates run --scope changed", skill)
+        self.assertIn("--json --no-interactive", skill)
+        self.assertIn("--ci --no-interactive", skill)
+        self.assertIn("--non-blocking", skill)
+        self.assertIn("code-approval-gates doctor --json --no-interactive", skill)
+        self.assertIn(".code-approval-gates.ignore", skill)
+        self.assertIn(".quality-gate.ignore", skill)
+        self.assertIn(".semantic-gate.ignore", skill)
+        self.assertIn("The deterministic Quality Gate owns", skill)
+        self.assertIn("The semantic gate owns reasoning", skill)
+        self.assertNotIn("npm test", skill)
         self.assertNotIn("sanitized quality gate summary", skill)
-        for item in forbidden:
-            self.assertNotIn(item, skill)
 
 
 if __name__ == "__main__":

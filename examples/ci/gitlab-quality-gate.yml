@@ -1,20 +1,17 @@
 quality_gate:
   stage: test
-  image: docker:28
-  services:
-    - name: docker:28-dind
-      command: ["--tls=false"]
+  image: node:22
   variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
+    GIT_DEPTH: "0"
   before_script:
-    - apk add --no-cache nodejs npm
-    - npm install -g quality-check
+    - npm install -g code-approval-gates
   script:
-    - quality-check . --threshold 90 --format=json,md --output .quality/reports
+    - code-approval-gates doctor quality --ci --no-interactive
+    - code-approval-gates quality --ci --scope changed --format json,md --output code-approval-report --no-interactive
   artifacts:
     when: always
     paths:
-      - .quality/reports/
+      - code-approval-report/
+    expire_in: 14 days
   rules:
-    - if: $CI_MERGE_REQUEST_IID
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'

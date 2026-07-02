@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
@@ -10,7 +12,9 @@ const {
   buildDockerArgs,
   commandLine,
   isDockerAvailable,
-  canBuildBundledImage
+  canBuildBundledImage,
+  resolveScopeFiles,
+  helpText
 } = require("../bin/quality-check.js");
 
 test("parseArgs keeps quality gate flags for the container", () => {
@@ -41,6 +45,12 @@ test("parseArgs keeps quality gate flags for the container", () => {
 test("parseArgs consumes wrapper-only flags", () => {
   const parsed = parseArgs([
     "src",
+    "--scope",
+    "paths",
+    "--path",
+    "src",
+    "--exclude",
+    "dist/**",
     "--image",
     "code-approval-gates/quality-sidecar:dev",
     "--pull",
@@ -52,12 +62,81 @@ test("parseArgs consumes wrapper-only flags", () => {
   ], {});
 
   assert.equal(parsed.target, "src");
+  assert.equal(parsed.scope, "paths");
+  assert.deepEqual(parsed.paths, ["src"]);
+  assert.deepEqual(parsed.excludes, ["dist/**"]);
   assert.equal(parsed.image, "code-approval-gates/quality-sidecar:dev");
   assert.equal(parsed.pull, true);
   assert.equal(parsed.build, true);
   assert.equal(parsed.debugDocker, true);
   assert.deepEqual(parsed.dockerArgs, ["--network=none"]);
   assert.deepEqual(parsed.containerArgs, ["--format", "json"]);
+});
+
+test("parseArgs defaults to changed scope and supports json headless mode", () => {
+  const parsed = parseArgs(["--json", "--no-interactive"], {});
+  assert.equal(parsed.scope, "changed");
+  assert.equal(parsed.json, true);
+  assert.equal(parsed.noInteractive, true);
+  assert.deepEqual(parsed.containerArgs, ["--format", "json"]);
+});
+
+test("parseArgs requires paths scope when --path is used", () => {
+  assert.throws(() => parseArgs(["--scope", "changed", "--path", "src"], {}), /--path can only be used with --scope paths/);
+  assert.throws(() => parseArgs(["--scope", "full", "--path", "src"], {}), /--path can only be used with --scope paths/);
+});
+
+test("resolveScopeFiles deduplicates ignore files and supports re-inclusion", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-wrapper-ignore-"));
+  try {
+    fs.writeFileSync(path.join(temp, "kept.js"), "const kept = true;\n", "utf8");
+    fs.writeFileSync(path.join(temp, "ignored.js"), "const ignored = true;\n", "utf8");
+    fs.writeFileSync(path.join(temp, ".gitignore"), "ignored.js\n", "utf8");
+    fs.writeFileSync(path.join(temp, ".quality-gate.ignore"), "ignored.js\n!ignored.js\n", "utf8");
+
+    const result = resolveScopeFiles(temp, {
+      scope: "full",
+      paths: [],
+      excludes: [],
+      includes: [],
+      ignoreFiles: [".quality-gate.ignore"]
+    });
+
+    assert.ok(result.ignoreFiles.includes(".gitignore"));
+    assert.equal(result.ignoreFiles.filter((file) => file === ".quality-gate.ignore").length, 1);
+    assert.ok(result.files.includes("ignored.js"));
+    assert.ok(result.files.includes("kept.js"));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("resolveScopeFiles paths scope does not add support files outside selected paths", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-wrapper-paths-"));
+  try {
+    fs.mkdirSync(path.join(temp, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(temp, "package.json"), "{\"name\":\"demo\"}\n", "utf8");
+    fs.writeFileSync(path.join(temp, "docs", "a.md"), "# A\n", "utf8");
+
+    const result = resolveScopeFiles(temp, {
+      scope: "paths",
+      paths: ["docs"],
+      excludes: [],
+      includes: [],
+      ignoreFiles: []
+    });
+
+    assert.deepEqual(result.files, ["docs/a.md"]);
+    assert.equal(result.files.includes("package.json"), false);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("help text documents ignore re-inclusion", () => {
+  assert.match(helpText(), /supports !path re-inclusion/);
+  assert.match(helpText(), /Add a path for scope=paths/);
+  assert.doesNotMatch(helpText(), /Limit changed\/full context/);
 });
 
 test("parseArgs normalizes PowerShell comma-expanded format values", () => {
@@ -88,7 +167,9 @@ test("buildDockerArgs creates the expected sidecar invocation", () => {
   assert.deepEqual(dockerArgs.slice(0, 2), ["run", "--rm"]);
   assert.ok(dockerArgs.includes(`${targetPath}:/workspace`));
   assert.ok(dockerArgs.includes(`${path.join(targetPath, ".quality", "reports")}:/workspace/.quality/reports`));
-  assert.deepEqual(dockerArgs.slice(-4), ["check", "/workspace", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--output"));
+  assert.ok(dockerArgs.includes(".quality/reports"));
+  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
 });
 
 test("commandLine quotes paths with spaces for debug output", () => {
@@ -117,6 +198,7 @@ test("runDockerWrapper propagates docker run exit code", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
   const target = path.join(temp, "target");
   fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
   const calls = [];
   const runner = (command, args) => {
     calls.push([command, args]);
@@ -132,14 +214,16 @@ test("runDockerWrapper propagates docker run exit code", () => {
     return { status: 3 };
   };
 
-  const exitCode = runDockerWrapper([target, "--image", "example/sidecar:test", "--threshold", "90"], process.env, runner);
+  const exitCode = runDockerWrapper([target, "--scope", "full", "--image", "example/sidecar:test", "--threshold", "90"], process.env, runner);
   assert.equal(exitCode, 7);
   const runCall = calls.find(([, args]) => args[0] === "run");
   assert.ok(runCall);
   const dockerArgs = runCall[1];
   assert.deepEqual(dockerArgs.slice(0, 2), ["run", "--rm"]);
   assert.ok(dockerArgs.includes("example/sidecar:test"));
-  assert.deepEqual(dockerArgs.slice(-4), ["check", "/workspace", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--output"));
+  assert.ok(dockerArgs.includes(".quality/reports"));
+  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
   assert.ok(fs.existsSync(path.join(target, ".quality", "reports")));
 });
 
@@ -152,6 +236,7 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
   const target = path.join(temp, "target");
   fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
   const calls = [];
   const runner = (command, args) => {
     calls.push([command, args]);
@@ -170,7 +255,7 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
     return { status: 3 };
   };
 
-  const exitCode = runDockerWrapper([target, "--image", "example/sidecar:test"], process.env, runner);
+  const exitCode = runDockerWrapper([target, "--scope", "full", "--image", "example/sidecar:test"], process.env, runner);
   assert.equal(exitCode, 0);
   assert.ok(calls.some(([, args]) => args[0] === "build" && args.includes("example/sidecar:test")));
   assert.ok(calls.some(([, args]) => args[0] === "run"));
@@ -178,4 +263,30 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
 
 test("canBuildBundledImage validates packaged build context", () => {
   assert.equal(canBuildBundledImage(path.resolve(__dirname, "..")), true);
+});
+
+test("writeEmptyQualityReport creates scoped approved report", () => {
+  const {
+    writeEmptyQualityReport
+  } = require("../bin/quality-check.js");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-empty-report-"));
+  try {
+    writeEmptyQualityReport(temp, {
+      scope: "changed",
+      files: [],
+      fileCount: 0,
+      ignoredCount: 0,
+      ignoreFiles: [],
+      commands: []
+    }, { target: "." });
+    const report = JSON.parse(fs.readFileSync(path.join(temp, "quality-report.json"), "utf8"));
+    assert.equal(report.status, "APPROVED");
+    assert.equal(report.scope.scope, "changed");
+    assert.equal(report.scoreAppliesTo, "changed-files");
+    assert.equal(report.findings.length, 0);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });

@@ -11,6 +11,7 @@
     "deterministicSummaryUsed",
     "objectiveSource",
     "changesReviewed",
+    "scoreAppliesTo",
     "hardBlockers",
     "scoreBreakdown",
     "commandsExecuted",
@@ -47,6 +48,9 @@
     },
     "changesReviewed": {
       "type": "string"
+    },
+    "scoreAppliesTo": {
+      "enum": ["changed-files", "entire-project", "selected-paths"]
     },
     "hardBlockers": {
       "type": "array",
@@ -149,4 +153,3 @@
   },
   "additionalProperties": true
 }
-

@@ -55,6 +55,7 @@ export function normalizeGateResult(
     deterministicSummaryUsed: false,
     objectiveSource: context.objective.source,
     changesReviewed: stringOr(raw.changesReviewed, summarizeChanges(context.gitContext)),
+    scoreAppliesTo: scoreAppliesToForScope(context.config.scope),
     hardBlockers: hardBlockers.length
       ? hardBlockers
       : blockingFindings.map((finding) => `${finding.path ?? "unknown"}: ${finding.message}`),
@@ -63,8 +64,8 @@ export function normalizeGateResult(
     findings,
     requiredFixPlan: normalizeStringArray(raw.requiredFixPlan),
     rerunCommands: normalizeStringArray(raw.rerunCommands, [
-      "semantic-gate run --objective-file <objective-file>",
-      "quality-check .",
+      "code-approval-gates semantic --scope changed --objective-file <objective-file> --json --no-interactive",
+      "code-approval-gates quality --scope changed --json --no-interactive",
     ]),
     approvalNotes: stringOr(raw.approvalNotes, "No approval notes returned by provider."),
     residualRisks: normalizeStringArray(raw.residualRisks),
@@ -116,12 +117,16 @@ export function mergeLocalFallbackResult(
     deterministicSummaryUsed: false,
     objectiveSource: context.objective.source,
     changesReviewed: summarizeChanges(context.gitContext),
+    scoreAppliesTo: scoreAppliesToForScope(context.config.scope),
     hardBlockers,
     scoreBreakdown: defaultBreakdown(),
     commandsExecuted: context.gitContext.commandsExecuted,
     findings,
     requiredFixPlan: unique(partials.flatMap((partial) => partial.requiredFixPlan)),
-    rerunCommands: ["semantic-gate run --objective-file <objective-file>", "quality-check ."],
+    rerunCommands: [
+      "code-approval-gates semantic --scope changed --objective-file <objective-file> --json --no-interactive",
+      "code-approval-gates quality --scope changed --json --no-interactive",
+    ],
     approvalNotes: "Merged locally from chunk-level semantic reviews because final synthesis was unavailable.",
     residualRisks: unique(partials.flatMap((partial) => partial.residualRisks)),
     contextWarnings: context.gitContext.warnings,
@@ -146,6 +151,10 @@ function normalizeStatus(value: unknown, score: number, threshold: number, block
     return "REJECTED";
   }
   return score >= threshold ? "APPROVED" : "NEEDS_CHANGES";
+}
+
+function scoreAppliesToForScope(scope: SemanticGateConfig["scope"]): GateResult["scoreAppliesTo"] {
+  return scope === "full" ? "entire-project" : scope === "paths" ? "selected-paths" : "changed-files";
 }
 
 function normalizeFindings(value: unknown): SemanticFinding[] {

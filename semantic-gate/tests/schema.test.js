@@ -7,7 +7,8 @@ test("semantic result schema fixes semantic gate invariants", () => {
   assert.equal(schema.properties.gate.const, "semantic");
   assert.equal(schema.properties.deterministicSummaryUsed.const, false);
   assert.deepEqual(schema.properties.status.enum, ["APPROVED", "NEEDS_CHANGES", "REJECTED"]);
+  assert.deepEqual(schema.properties.scoreAppliesTo.enum, ["changed-files", "entire-project", "selected-paths"]);
+  assert.ok(schema.required.includes("scoreAppliesTo"));
   assert.ok(schema.required.includes("findings"));
   assert.ok(schema.required.includes("requiredFixPlan"));
 });
-

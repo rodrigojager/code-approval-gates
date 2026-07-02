@@ -12,12 +12,17 @@ export type FindingCategory =
   | "ai-generated-code-risk";
 
 export interface SemanticGateConfig {
+  scope: "changed" | "full" | "paths";
   provider?: string;
   model?: string;
   threshold: number;
   output: "json" | "markdown";
   base?: string;
   head?: string;
+  paths: string[];
+  excludes: string[];
+  includes: string[];
+  ignoreFiles: string[];
   includeUntracked: boolean;
   maxContextChars: number;
   maxFileChars: number;
@@ -80,6 +85,11 @@ export interface FileContext {
 
 export interface GitReviewContext {
   repoRoot: string;
+  scope: "changed" | "full" | "paths";
+  paths: string[];
+  excludes: string[];
+  includes: string[];
+  ignoreFiles: string[];
   statusShort: string;
   diffStat: string;
   stagedDiffStat: string;
@@ -113,6 +123,7 @@ export interface GateResult {
   deterministicSummaryUsed: false;
   objectiveSource: string;
   changesReviewed: string;
+  scoreAppliesTo: "changed-files" | "entire-project" | "selected-paths";
   hardBlockers: string[];
   scoreBreakdown: ScoreBreakdownItem[];
   commandsExecuted: CommandRecord[];

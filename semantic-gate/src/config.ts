@@ -8,8 +8,13 @@ import type { CliOptions, SemanticGateConfig } from "./types.js";
 export const PROJECT_CONFIG = ".semantic-gate.json";
 
 export const defaultConfig: SemanticGateConfig = {
+  scope: "changed",
   threshold: 90,
   output: "json",
+  paths: [],
+  excludes: [],
+  includes: [],
+  ignoreFiles: [],
   includeUntracked: true,
   maxContextChars: 160_000,
   maxFileChars: 50_000,
@@ -70,7 +75,7 @@ export function loadEffectiveConfig(cwd: string, cliOptions: CliOptions): Semant
     ...projectConfig,
     ...envConfig,
     ...flagConfig,
-  });
+  }, cliOptions);
 }
 
 export function readJsonIfExists(filePath: string): Record<string, unknown> {
@@ -92,6 +97,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
   const config: Record<string, unknown> = {};
   setIfPresent(config, "provider", env.SEMANTIC_GATE_PROVIDER);
   setIfPresent(config, "model", env.SEMANTIC_GATE_MODEL);
+  setIfPresent(config, "scope", env.SEMANTIC_GATE_SCOPE);
+  setIfPresent(config, "paths", env.SEMANTIC_GATE_PATHS);
+  setIfPresent(config, "excludes", env.SEMANTIC_GATE_EXCLUDES);
+  setIfPresent(config, "includes", env.SEMANTIC_GATE_INCLUDES);
+  setIfPresent(config, "ignoreFiles", env.SEMANTIC_GATE_IGNORE_FILES);
   setIfPresent(config, "threshold", env.SEMANTIC_GATE_THRESHOLD);
   setIfPresent(config, "output", env.SEMANTIC_GATE_OUTPUT);
   setIfPresent(config, "base", env.SEMANTIC_GATE_BASE);
@@ -184,7 +194,7 @@ function normalizeFlagConfig(options: CliOptions): Record<string, unknown> {
   return config;
 }
 
-function normalizeConfig(input: Record<string, unknown>): SemanticGateConfig {
+function normalizeConfig(input: Record<string, unknown>, cliOptions: CliOptions = {}): SemanticGateConfig {
   const output = { ...defaultConfig, ...input } as SemanticGateConfig;
   output.threshold = numberValue(input.threshold, defaultConfig.threshold, "threshold");
   output.maxContextChars = numberValue(input.maxContextChars, defaultConfig.maxContextChars, "maxContextChars");
@@ -194,7 +204,23 @@ function normalizeConfig(input: Record<string, unknown>): SemanticGateConfig {
   output.temperature = numberValue(input.temperature, defaultConfig.temperature, "temperature");
   output.includeUntracked = booleanValue(input.includeUntracked, defaultConfig.includeUntracked);
   output.writeReports = booleanValue(input.writeReports, defaultConfig.writeReports);
+  output.paths = stringArrayValue(input.paths, defaultConfig.paths);
+  output.excludes = stringArrayValue(input.excludes, defaultConfig.excludes);
+  output.includes = stringArrayValue(input.includes, defaultConfig.includes);
+  output.ignoreFiles = stringArrayValue(input.ignoreFiles, defaultConfig.ignoreFiles);
 
+  if (!["changed", "full", "paths"].includes(output.scope)) {
+    throw new SemanticGateError("scope must be changed, full, or paths.", "usage");
+  }
+  if (output.scope !== "paths" && cliOptions.paths && cliOptions.paths.length > 0) {
+    throw new SemanticGateError("--path can only be used with scope=paths.", "usage");
+  }
+  if (output.scope !== "paths") {
+    output.paths = [];
+  }
+  if (output.scope === "paths" && output.paths.length === 0) {
+    throw new SemanticGateError("scope=paths requires at least one --path.", "usage");
+  }
   if (input.commandArgs !== undefined) {
     if (Array.isArray(input.commandArgs)) {
       output.commandArgs = input.commandArgs.map(String);
@@ -252,4 +278,21 @@ function booleanValue(value: unknown, fallback: boolean): boolean {
     return value;
   }
   return String(value).toLowerCase() === "true";
+}
+
+function stringArrayValue(value: unknown, fallback: string[]): string[] {
+  if (value === undefined) {
+    return fallback;
+  }
+  if (Array.isArray(value)) {
+    return value.map(String).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    const parsed = parseScalar(value);
+    if (Array.isArray(parsed)) {
+      return parsed.map(String).filter(Boolean);
+    }
+    return value.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
+  }
+  return [String(value)].filter(Boolean);
 }

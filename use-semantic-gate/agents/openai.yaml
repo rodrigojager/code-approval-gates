@@ -1,4 +1,4 @@
 interface:
   display_name: "Use Semantic Gate"
-  short_description: "Run semantic-gate and fix code until approved."
-  default_prompt: "Run semantic-gate for the current changes, fix issues without lowering the threshold, and repeat until approved."
+  short_description: "Run code-approval-gates semantic in headless mode and fix code until approved."
+  default_prompt: "Run code-approval-gates semantic --scope changed --json --no-interactive for the current changes, provide an objective with --objective-file or --objective-stdin, run code-approval-gates doctor semantic --json --no-interactive if setup is uncertain, use doctor semantic --fix --yes --no-interactive only with explicit user authorization, fix issues without lowering the threshold, and repeat until approved."

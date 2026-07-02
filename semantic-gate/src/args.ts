@@ -40,6 +40,14 @@ const keyMap: Record<string, string> = {
   "model-list-args": "modelListArgs",
   "command-prompt-mode": "commandPromptMode",
   "command-output": "commandOutput",
+  "ignore-file": "ignoreFiles",
+};
+
+const arrayFlags: Record<string, string> = {
+  path: "paths",
+  exclude: "excludes",
+  include: "includes",
+  "ignore-file": "ignoreFiles",
 };
 
 export function parseCli(argv: string[]): ParsedCli {
@@ -67,6 +75,20 @@ export function parseCli(argv: string[]): ParsedCli {
     const flag = eqIndex >= 0 ? withoutPrefix.slice(0, eqIndex) : withoutPrefix;
     const explicitValue = eqIndex >= 0 ? withoutPrefix.slice(eqIndex + 1) : undefined;
     const key = keyMap[flag] ?? flag;
+
+    if (arrayFlags[flag]) {
+      const value = explicitValue ?? rest[index + 1];
+      if (value === undefined) {
+        throw new SemanticGateError(`Missing value for --${flag}.`, "usage");
+      }
+      if (explicitValue === undefined) {
+        index += 1;
+      }
+      const arrayKey = arrayFlags[flag]!;
+      const existing = options[arrayKey];
+      options[arrayKey] = [...(Array.isArray(existing) ? existing : []), String(value)];
+      continue;
+    }
 
     if (flag.startsWith("no-")) {
       options[key] = false;

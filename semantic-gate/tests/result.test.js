@@ -16,6 +16,7 @@ test("parseProviderResult accepts fenced JSON and normalizeGateResult enforces s
   const result = normalizeGateResult(parsed, {
     config: {
       threshold: 90,
+      scope: "changed",
       output: "json",
       includeUntracked: true,
       maxContextChars: 1000,
@@ -46,6 +47,7 @@ test("parseProviderResult accepts fenced JSON and normalizeGateResult enforces s
   assert.equal(result.deterministicSummaryUsed, false);
   assert.equal(result.status, "APPROVED");
   assert.equal(result.threshold, 90);
+  assert.equal(result.scoreAppliesTo, "changed-files");
 });
 
 test("blocking findings force rejection and cap score", () => {
@@ -66,6 +68,7 @@ test("blocking findings force rejection and cap score", () => {
     {
       config: {
         threshold: 90,
+        scope: "changed",
         output: "json",
         includeUntracked: true,
         maxContextChars: 1000,
@@ -97,4 +100,3 @@ test("blocking findings force rejection and cap score", () => {
   assert.equal(result.score, 69);
   assert.equal(result.hardBlockers.length, 1);
 });
-

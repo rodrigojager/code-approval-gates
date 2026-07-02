@@ -1,59 +1,24 @@
-name: Gates
+name: code-approval-gates
 
 on:
   pull_request:
   workflow_dispatch:
 
 jobs:
-  semantic-gate:
+  code-approval-gates:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "22"
-      - run: npm install -g semantic-gate
-      - name: Install Codex CLI
-        run: curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
-      - name: Add Codex CLI to PATH
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Run semantic gate
-        env:
-          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
-        run: |
-          semantic-gate run \
-            --objective-file .quality/objective.md \
-            --provider codex-cli \
-            --model gpt-5.5 \
-            --reasoning-effort high \
-            --base "origin/${{ github.base_ref }}" \
-            --head "${{ github.sha }}" \
-            --ci \
-            --json
+          node-version: 22
+      - run: npm install -g code-approval-gates
+      - run: code-approval-gates doctor --ci --no-interactive
+      - run: code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: semantic-gate
-          path: .quality/semantic-gate/
-
-  quality-gate:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: npm install -g quality-check
-      - name: Run quality gate
-        run: quality-check . --threshold 90 --format=json,md --output .quality/reports
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: quality-gate
-          path: .quality/reports/
+          name: code-approval-report
+          path: code-approval-report/

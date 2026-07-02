@@ -222,7 +222,9 @@ Usage:
   semantic-gate init
   semantic-gate config set provider openrouter
   semantic-gate config set model anthropic/claude-sonnet-4
-  semantic-gate run --objective-file objective.md
+  semantic-gate run --scope changed --objective-file objective.md
+  semantic-gate run --scope full --objective-file objective.md
+  semantic-gate run --scope paths --path docs --objective-file objective.md
   semantic-gate run --objective-stdin --json --ci
 
 Commands:
@@ -237,6 +239,11 @@ Commands:
 Important run flags:
   --objective-file <path>       Read the objective from a UTF-8 file.
   --objective-stdin             Read the objective from stdin.
+  --scope <changed|full|paths>  changed is the default; full does not require a diff.
+  --path <path>                 Add a path for scope=paths; repeatable.
+  --exclude <glob>              Exclude files using gitignore-style globs; repeatable.
+  --include <glob>              Re-include a previously excluded file; repeatable.
+  --ignore-file <path>          Add a custom gitignore-style ignore file; repeatable.
   --json                        Force JSON output.
   --ci                          CI/headless mode; implies JSON output.
   --provider <name>             openrouter, openai, anthropic/claude, openai-compatible, opencode-api, ollama, gemini/gemini-api, command, codex-cli, claude-code, gemini-cli, opencode.

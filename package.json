@@ -2,13 +2,20 @@
   "name": "code-approval-gates",
   "version": "0.1.0",
   "private": true,
-  "description": "Distribution workspace for semantic-gate and quality-check gates.",
+  "description": "Unified Code Approval Gates CLI with deterministic quality checks, AI semantic review, scopes, ignores, baselines, doctor, wizard, and CI/headless workflows.",
   "bin": {
+    "code-approval-gates": "bin/code-approval-gates.js",
     "semantic-gate": "semantic-gate/dist/cli.js",
     "quality-check": "quality-gate/bin/quality-check.js"
   },
   "files": [
     "README.md",
+    ".code-approval-gates.example.json",
+    ".code-approval-gates.ignore",
+    ".quality-gate.ignore",
+    ".semantic-gate.ignore",
+    "bin/",
+    "tests/",
     "examples/ci/",
     "scripts/",
     "use-semantic-gate/",
@@ -17,6 +24,7 @@
     "semantic-gate/templates/",
     "semantic-gate/examples/",
     "semantic-gate/schemas/",
+    "semantic-gate/tests/",
     "semantic-gate/README.md",
     "semantic-gate/LICENSE",
     "semantic-gate/package.json",
@@ -26,6 +34,7 @@
     "quality-gate/examples/",
     "quality-gate/scripts/",
     "quality-gate/skill/",
+    "quality-gate/tests/",
     "quality-gate/Dockerfile",
     "quality-gate/.dockerignore",
     "quality-gate/quality-check.ps1",
@@ -45,12 +54,23 @@
   "scripts": {
     "prepare": "npm --prefix semantic-gate install --ignore-scripts --workspaces=false --dry-run=false && npm --prefix semantic-gate run build --workspaces=false",
     "link:local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/link-local.ps1",
-    "test": "npm run test:semantic && npm run test:quality",
+    "test": "npm run test:root && npm run test:semantic && npm run test:quality",
+    "test:root": "node --test tests/*.test.js",
     "test:semantic": "npm --prefix semantic-gate test --workspaces=false",
+    "test:semantic:build": "npm --prefix semantic-gate run test:build --workspaces=false",
     "test:quality": "npm --prefix quality-gate test --workspaces=false",
     "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-all.ps1"
   },
   "engines": {
     "node": ">=18.17"
-  }
+  },
+  "keywords": [
+    "code-approval-gates",
+    "quality-gate",
+    "semantic-gate",
+    "mlops",
+    "ci",
+    "static-analysis",
+    "ai-review"
+  ]
 }

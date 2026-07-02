@@ -33,7 +33,7 @@ export function buildPromptChunks(
 
   const fileBlocks = context.changedFiles.map(formatFileBlock);
   const allFiles = fileBlocks.join("\n\n");
-  const singlePrompt = `${shared}\n\n## Changed File Context\n\n${allFiles}\n\n${finalInstruction(config)}`;
+  const singlePrompt = `${shared}\n\n## File Context\n\n${allFiles}\n\n${finalInstruction(config)}`;
 
   if (config.contextStrategy !== "chunked" && singlePrompt.length <= config.maxContextChars) {
     return [{ label: "full-review", prompt: singlePrompt }];
@@ -81,7 +81,7 @@ export function buildSynthesisPrompt(
   return [
     buildSharedHeader(objective, context, config),
     "## Partial Semantic Reviews",
-    "The following JSON objects are partial semantic reviews over disjoint changed-file chunks. Synthesize a final gate result for the whole change.",
+      "The following JSON objects are partial semantic reviews over disjoint file-context chunks. Synthesize a final gate result for the requested scope.",
     JSON.stringify(partialResults, null, 2),
     finalInstruction(config),
   ].join("\n\n");
@@ -95,7 +95,7 @@ function chunkPrompt(
 ): PromptChunk {
   return {
     label: `chunk-${index}`,
-    prompt: `${shared}\n\n## Changed File Context Chunk ${index}\n\n${blocks.join("\n\n")}\n\n${finalInstruction(config)}`,
+    prompt: `${shared}\n\n## File Context Chunk ${index}\n\n${blocks.join("\n\n")}\n\n${finalInstruction(config)}`,
   };
 }
 
@@ -112,6 +112,11 @@ function buildSharedHeader(
     objective.text,
     "## Repository Context",
     `Repo root: ${context.repoRoot}`,
+    `Scope: ${context.scope}`,
+    `Configured paths: ${context.paths.length ? context.paths.join(", ") : "(none)"}`,
+    `Configured excludes: ${context.excludes.length ? context.excludes.join(", ") : "(none)"}`,
+    `Configured includes: ${context.includes.length ? context.includes.join(", ") : "(none)"}`,
+    `Ignore files used: ${context.ignoreFiles.length ? context.ignoreFiles.join(", ") : "(none)"}`,
     `Threshold: ${config.threshold}`,
     "Deterministic summary used: false",
     "## Git Status",
@@ -189,7 +194,10 @@ function finalInstruction(config: SemanticGateConfig): string {
             },
           ],
           requiredFixPlan: ["step"],
-          rerunCommands: ["semantic-gate run --objective-file <file>", "quality-check ."],
+          rerunCommands: [
+            "code-approval-gates semantic --scope changed --objective-file <file> --json --no-interactive",
+            "code-approval-gates quality --scope changed --json --no-interactive",
+          ],
           approvalNotes: "string",
           residualRisks: ["string"],
           contextWarnings: ["string"],
@@ -214,4 +222,3 @@ function loadSkillTemplate(): string {
 function fenced(text: string): string {
   return `\`\`\`\n${text}\n\`\`\``;
 }
-

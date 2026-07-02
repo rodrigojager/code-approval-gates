@@ -12,6 +12,11 @@ interface CredentialStatus {
 export interface StatusSummary {
   provider: string | null;
   model: string | null;
+  scope: string;
+  paths: string[];
+  excludes: string[];
+  includes: string[];
+  ignoreFiles: string[];
   threshold: number;
   output: string;
   contextStrategy: string;
@@ -42,6 +47,11 @@ export function buildStatusSummary(cwd: string, config: SemanticGateConfig): Sta
   return {
     provider: config.provider ?? null,
     model: config.model ?? null,
+    scope: config.scope,
+    paths: config.paths,
+    excludes: config.excludes,
+    includes: config.includes,
+    ignoreFiles: config.ignoreFiles,
     threshold: config.threshold,
     output: config.output,
     contextStrategy: config.contextStrategy,
@@ -75,6 +85,11 @@ export function renderStatus(summary: StatusSummary): string {
     "",
     `Provider: ${summary.provider ?? "(not set)"}`,
     `Model: ${summary.model ?? "(not set)"}`,
+    `Scope: ${summary.scope}`,
+    `Paths: ${summary.paths.length ? summary.paths.join(", ") : "(none)"}`,
+    `Excludes: ${summary.excludes.length ? summary.excludes.join(", ") : "(none)"}`,
+    `Includes: ${summary.includes.length ? summary.includes.join(", ") : "(none)"}`,
+    `Ignore files: ${summary.ignoreFiles.length ? summary.ignoreFiles.join(", ") : "(auto)"}`,
     `Threshold: ${summary.threshold}`,
     `Output: ${summary.output}`,
     `Context strategy: ${summary.contextStrategy}`,

@@ -1,6 +1,5 @@
 import path from "node:path";
 import { collectGitReviewContext } from "./context.js";
-import { SemanticGateError } from "./errors.js";
 import { callProvider } from "./providers.js";
 import { buildPromptChunks, buildSynthesisPrompt, systemPrompt } from "./prompt.js";
 import { writeReports } from "./report.js";
@@ -19,7 +18,53 @@ export async function runSemanticGate(options: RunSemanticGateOptions): Promise<
 }> {
   const gitContext = await collectGitReviewContext(options.cwd, options.config);
   if (gitContext.changedFiles.length === 0) {
-    throw new SemanticGateError("No changed files found to review.", "context");
+    const emptyResult: GateResult = {
+      gate: "semantic",
+      status: "APPROVED",
+      score: 100,
+      threshold: options.config.threshold,
+      deterministicSummaryUsed: false,
+      objectiveSource: options.objective.source,
+      changesReviewed: `No files matched scope=${options.config.scope}.`,
+      scoreAppliesTo: scoreAppliesToForScope(options.config.scope),
+      hardBlockers: [],
+      scoreBreakdown: [
+        { category: "functional", weight: 25, score: 100, observations: "No files were reviewed in the selected scope." },
+        { category: "tests", weight: 20, score: 100, observations: "No files were reviewed in the selected scope." },
+        { category: "security", weight: 20, score: 100, observations: "No files were reviewed in the selected scope." },
+        { category: "maintainability", weight: 15, score: 100, observations: "No files were reviewed in the selected scope." },
+        { category: "architecture", weight: 10, score: 100, observations: "No files were reviewed in the selected scope." },
+        { category: "performance", weight: 10, score: 100, observations: "No files were reviewed in the selected scope." },
+      ],
+      commandsExecuted: gitContext.commandsExecuted,
+      findings: [],
+      requiredFixPlan: [],
+      rerunCommands: [
+        "code-approval-gates semantic --scope changed --objective-file <objective-file> --json --no-interactive",
+        "code-approval-gates quality --scope changed --json --no-interactive",
+      ],
+      approvalNotes: "No files were matched for this scope. Review was skipped.",
+      residualRisks: [],
+      contextWarnings: gitContext.warnings.length
+        ? [`No files matched scope=${options.config.scope}.`, ...gitContext.warnings]
+        : [`No files matched scope=${options.config.scope}.`],
+      provider: options.config.provider ?? "unconfigured",
+    };
+    if (options.config.writeReports) {
+      const providerResponses: ProviderResponse[] = [{
+        text: JSON.stringify({
+          status: emptyResult.status,
+          score: emptyResult.score,
+          findings: [],
+          requiredFixPlan: emptyResult.requiredFixPlan,
+          hardBlockers: emptyResult.hardBlockers,
+          scoreBreakdown: emptyResult.scoreBreakdown,
+        }),
+        raw: { status: emptyResult.status },
+      }];
+      return { result: emptyResult, reports: writeReports(emptyResult, providerResponses, path.resolve(gitContext.repoRoot, options.config.outputDir)) };
+    }
+    return { result: emptyResult };
   }
 
   const chunks = buildPromptChunks(options.objective, gitContext, options.config);
@@ -75,11 +120,16 @@ export async function runSemanticGate(options: RunSemanticGateOptions): Promise<
     }
   }
 
+  result.scoreAppliesTo = scoreAppliesToForScope(options.config.scope);
   const outputDir = path.resolve(gitContext.repoRoot, options.config.outputDir);
   if (options.config.writeReports) {
     return { result, reports: writeReports(result, providerResponses, outputDir) };
   }
   return { result };
+}
+
+function scoreAppliesToForScope(scope: SemanticGateConfig["scope"]): GateResult["scoreAppliesTo"] {
+  return scope === "full" ? "entire-project" : scope === "paths" ? "selected-paths" : "changed-files";
 }
 
 function optionalModelContext<T extends { model?: string }>(context: Omit<T, "model">, model: string | undefined): T {
