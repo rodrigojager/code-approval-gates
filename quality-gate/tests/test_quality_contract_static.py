@@ -6,10 +6,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def read_repo(path: str) -> str:
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
 class StaticQualityGateContractTests(unittest.TestCase):
@@ -84,23 +89,26 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("baseline support", readme)
 
     def test_complementary_skill_does_not_duplicate_deterministic_checks_or_privacy_scans(self) -> None:
-        skill = read("skill/quality-gate.md")
+        quality_skill = read("skill/quality-gate.md")
+        semantic_skill = read_repo("use-semantic-gate/SKILL.md")
+        semantic_rubric = read_repo("semantic-gate/templates/semantic-review-skill.md")
 
-        self.assertIn("Complementary Semantic Quality Review", skill)
-        self.assertIn("code-approval-gates semantic --scope changed", skill)
-        self.assertIn("--objective \"Review architecture, quality, and risks\"", skill)
-        self.assertIn("code-approval-gates run --scope changed", skill)
-        self.assertIn("--json --no-interactive", skill)
-        self.assertIn("--ci --no-interactive", skill)
-        self.assertIn("--non-blocking", skill)
-        self.assertIn("code-approval-gates doctor --json --no-interactive", skill)
-        self.assertIn(".code-approval-gates.ignore", skill)
-        self.assertIn(".quality-gate.ignore", skill)
-        self.assertIn(".semantic-gate.ignore", skill)
-        self.assertIn("The deterministic Quality Gate owns", skill)
-        self.assertIn("The semantic gate owns reasoning", skill)
-        self.assertNotIn("npm test", skill)
-        self.assertNotIn("sanitized quality gate summary", skill)
+        self.assertIn("Complementary Semantic Quality Review", semantic_rubric)
+        self.assertIn("code-approval-gates semantic --scope changed", semantic_skill)
+        self.assertIn("--objective \"Review architecture, quality, and risks\"", semantic_skill)
+        self.assertIn("code-approval-gates run --scope changed", semantic_skill)
+        self.assertIn("--json --no-interactive", semantic_skill)
+        self.assertIn("--ci --no-interactive", semantic_skill)
+        self.assertIn("--non-blocking", semantic_skill)
+        self.assertIn("code-approval-gates doctor semantic --json --no-interactive", semantic_skill)
+        self.assertIn(".code-approval-gates.ignore", semantic_skill)
+        self.assertIn(".quality-gate.ignore", quality_skill)
+        self.assertIn(".semantic-gate.ignore", semantic_skill)
+        self.assertIn("The deterministic Quality Gate owns", quality_skill)
+        self.assertIn("The Semantic Gate owns reasoning", quality_skill)
+        self.assertNotIn("code-approval-gates semantic --scope changed", quality_skill)
+        self.assertNotIn("npm test", quality_skill + semantic_skill)
+        self.assertNotIn("sanitized quality gate summary", semantic_rubric)
 
 
 if __name__ == "__main__":

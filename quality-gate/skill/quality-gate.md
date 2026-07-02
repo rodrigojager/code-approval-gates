@@ -85,6 +85,12 @@ Before a real run, use doctor when setup is uncertain:
 code-approval-gates doctor quality --json --no-interactive
 ```
 
+For a broader readiness check:
+
+```powershell
+code-approval-gates doctor --json --no-interactive
+```
+
 Use `code-approval-gates doctor --fix` only when the user authorizes safe local setup changes.
 For scripts, CI, or other headless callers, make that authorization explicit:
 

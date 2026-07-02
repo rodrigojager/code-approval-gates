@@ -370,6 +370,12 @@ function resolveScopeFiles(targetPath, parsed) {
     }
   }
 
+  if (parsed.scope === "full") {
+    files.push(...collectIncludedFiles(targetPath, ignorePlan, [""]));
+  } else if (parsed.scope === "paths") {
+    files.push(...collectIncludedFiles(targetPath, ignorePlan, parsed.paths));
+  }
+
   if (parsed.scope === "full" || (parsed.scope === "changed" && files.length > 0)) {
     for (const support of SUPPORT_FILES) {
       if (fs.existsSync(path.join(targetPath, support))) {
@@ -389,6 +395,31 @@ function resolveScopeFiles(targetPath, parsed) {
     ignoreFiles: ignorePlan.files,
     commands
   };
+}
+
+function collectIncludedFiles(targetPath, ignorePlan, roots) {
+  const includePatterns = [...new Set(ignorePlan.rules
+    .filter((rule) => rule.include)
+    .map((rule) => normalizePath(rule.pattern))
+    .filter(Boolean))];
+
+  if (!includePatterns.length) {
+    return [];
+  }
+
+  const selectedRoots = roots.length ? roots : [""];
+  const files = [];
+  for (const root of selectedRoots) {
+    const normalizedRoot = normalizePath(root);
+    const absoluteRoot = path.join(targetPath, normalizedRoot);
+    for (const filePath of walkFiles(absoluteRoot)) {
+      const relative = normalizePath(path.relative(targetPath, filePath));
+      if (includePatterns.some((pattern) => matchesPattern(relative, pattern))) {
+        files.push(relative);
+      }
+    }
+  }
+  return files;
 }
 
 function resolveGitRange() {

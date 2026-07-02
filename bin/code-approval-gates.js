@@ -67,7 +67,68 @@ function normalizedOptions(cwd,options){
 function loadProjectConfig(cwd){const configPath=path.join(cwd,DEFAULT_CONFIG);if(!fs.existsSync(configPath))return{};try{return JSON.parse(fs.readFileSync(configPath,"utf8"))}catch(error){return{configError:error.message}}}
 async function handleRun(cwd,rawOptions,requestedGate){const options=normalizedOptions(cwd,rawOptions);if(!options.quality&&!options.semantic)return fail(options,2,"NO_GATES_ENABLED","No gates are enabled.","Remove either --no-quality or --no-semantic.");const mode=detectExecutionMode(options);const baselinePathOption=typeof rawOptions.baseline==="string"?rawOptions.baseline:typeof options.baseline==="string"?options.baseline:null;const outputDir=path.resolve(cwd,options.output);fs.mkdirSync(outputDir,{recursive:true});const summary={schemaVersion:1,tool:"code-approval-gates",version:VERSION,status:"ERROR",startedAt:new Date().toISOString(),finishedAt:null,scope:options.scope,scoreAppliesTo:scoreAppliesToForScope(options.scope),mode:mode.headless?"headless":"interactive",interactive:mode.interactive,ci:mode.ci,threshold:options.threshold,commandEquivalent:buildEquivalentCommand(requestedGate,options),base:options.base||null,head:options.head||null,paths:options.paths,excludes:options.excludes,includes:options.includes,baselineUsed:Boolean(baselinePathOption),qualityScore:null,semanticScore:null,finalScore:null,reports:{},scopeResolution:null,gates:[],errors:[]};try{const gateKind=options.semantic&&!options.quality?"semantic":options.quality&&!options.semantic?"quality":"combined";const scopeResolution=resolveScopeFiles(cwd,options,gateKind);summary.scopeResolution=scopeResolution;if(scopeResolution.files.length===0){summary.status="APPROVED";summary.finalScore=100;if(options.quality)summary.qualityScore=100;if(options.semantic)summary.semanticScore=100;summary.finishedAt=new Date().toISOString();summary.message="No files matched the requested scope after ignore rules.";writeSummary(outputDir,summary,options);return exitWithSummary(summary,options,0)}if(options.semantic){const semantic=runSemanticGate(cwd,outputDir,options,mode);summary.gates.push(semantic.gate);summary.reports.semanticJson=semantic.semanticJson||null;summary.reports.semanticMarkdown=semantic.semanticMarkdown||null;summary.semanticScore=semantic.score;if(semantic.error)summary.errors.push(semantic.error)}if(options.quality){const quality=runQualityGate(cwd,outputDir,options,mode);summary.gates.push(quality.gate);summary.reports.qualityJson=quality.qualityJson||null;summary.reports.qualityMarkdown=quality.qualityMarkdown||null;summary.qualityScore=quality.score;if(quality.error)summary.errors.push(quality.error)}const baseline=baselinePathOption?loadBaseline(path.resolve(cwd,String(baselinePathOption))):null;if(baseline)summary.baseline=compareBaseline(baseline,summary);finalizeSummary(summary,options);writeSummary(outputDir,summary,options);return exitWithSummary(summary,options,summary.status==="APPROVED"||options.nonBlocking?0:1)}catch(error){summary.status="ERROR";summary.finishedAt=new Date().toISOString();summary.errors.push(toErrorObject(error));writeSummary(outputDir,summary,options);return exitWithSummary(summary,options,exitCodeForError(error))}}
 function createProjection(cwd,options,gateKind){const scopeResolution=resolveScopeFiles(cwd,options,gateKind);const runId=`${Date.now()}-${Math.random().toString(16).slice(2)}`;const projectionRoot=path.join(cwd,".quality","scopes",runId);const workspace=path.join(projectionRoot,"workspace");fs.mkdirSync(workspace,{recursive:true});for(const file of scopeResolution.files){const source=path.join(cwd,file);const target=path.join(workspace,file);if(!fs.existsSync(source)||!fs.statSync(source).isFile())continue;fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(source,target)}spawnSync("git",["init"],{cwd:workspace,encoding:"utf8",timeout:15000});return{projectionRoot,workspace,scopeResolution}}
-function resolveScopeFiles(cwd,options,gateKind){const scope=options.scope;const ignoreRules=buildIgnoreRules(cwd,gateKind,options);let files=[];const commands=[];let base=options.base;let head=options.head;if(scope==="paths"&&(!options.paths||options.paths.length===0))throwUsage("--scope paths requires at least one --path");if(scope==="changed"){const range=resolveGitRange(options);base=range.base;head=range.head;if(range.base||range.head){const args=["diff","--name-only",`${range.base||"HEAD"}...${range.head||"HEAD"}`];const result=runCaptured("git",args,cwd);commands.push(recordCommand("git",args,result));files=splitLines(result.stdout)}else{for(const args of [["diff","--name-only"],["diff","--cached","--name-only"],["ls-files","--others","--exclude-standard"]]){const result=runCaptured("git",args,cwd);commands.push(recordCommand("git",args,result));files.push(...splitLines(result.stdout))}}}else if(scope==="full"){const args=["ls-files","-co","--exclude-standard"];const result=runCaptured("git",args,cwd);commands.push(recordCommand("git",args,result));files=result.status===0?splitLines(result.stdout):walkFiles(cwd).map(file=>normalizePath(path.relative(cwd,file)))}else if(scope==="paths"){for(const targetPath of options.paths){const normalized=normalizePath(targetPath);const args=["ls-files","-co","--exclude-standard","--",normalized];const result=runCaptured("git",args,cwd);commands.push(recordCommand("git",args,result));files.push(...(result.status===0?splitLines(result.stdout):walkFiles(path.join(cwd,normalized)).map(file=>normalizePath(path.relative(cwd,file)))))}}if(scope==="full"||(scope==="changed"&&files.length>0)){for(const support of SUPPORT_FILES){if(fs.existsSync(path.join(cwd,support)))files.push(support)}}const unique=[...new Set(files.map(normalizePath).filter(Boolean))];const filtered=unique.filter(file=>fs.existsSync(path.join(cwd,file))&&fs.statSync(path.join(cwd,file)).isFile()).filter(file=>!isIgnored(file,ignoreRules));return{scope,base:base||null,head:head||null,files:filtered.sort(),fileCount:filtered.length,ignoredCount:unique.length-filtered.length,ignoreFiles:ignoreRules.files,commands}}
+function resolveScopeFiles(cwd,options,gateKind){
+  const scope=options.scope;
+  const ignoreRules=buildIgnoreRules(cwd,gateKind,options);
+  let files=[];
+  const commands=[];
+  let base=options.base;
+  let head=options.head;
+  if(scope==="paths"&&(!options.paths||options.paths.length===0))throwUsage("--scope paths requires at least one --path");
+  if(scope==="changed"){
+    const range=resolveGitRange(options);
+    base=range.base;
+    head=range.head;
+    if(range.base||range.head){
+      const args=["diff","--name-only",`${range.base||"HEAD"}...${range.head||"HEAD"}`];
+      const result=runCaptured("git",args,cwd);
+      commands.push(recordCommand("git",args,result));
+      files=splitLines(result.stdout);
+    }else{
+      for(const args of [["diff","--name-only"],["diff","--cached","--name-only"],["ls-files","--others","--exclude-standard"]]){
+        const result=runCaptured("git",args,cwd);
+        commands.push(recordCommand("git",args,result));
+        files.push(...splitLines(result.stdout));
+      }
+    }
+  }else if(scope==="full"){
+    const args=["ls-files","-co","--exclude-standard"];
+    const result=runCaptured("git",args,cwd);
+    commands.push(recordCommand("git",args,result));
+    files=result.status===0?splitLines(result.stdout):walkFiles(cwd).map(file=>normalizePath(path.relative(cwd,file)));
+  }else if(scope==="paths"){
+    for(const targetPath of options.paths){
+      const normalized=normalizePath(targetPath);
+      const args=["ls-files","-co","--exclude-standard","--",normalized];
+      const result=runCaptured("git",args,cwd);
+      commands.push(recordCommand("git",args,result));
+      files.push(...(result.status===0?splitLines(result.stdout):walkFiles(path.join(cwd,normalized)).map(file=>normalizePath(path.relative(cwd,file)))));
+    }
+  }
+  if(scope==="full")files.push(...collectIncludedFiles(cwd,ignoreRules,[""]));
+  else if(scope==="paths")files.push(...collectIncludedFiles(cwd,ignoreRules,options.paths));
+  if(scope==="full"||(scope==="changed"&&files.length>0)){
+    for(const support of SUPPORT_FILES){
+      if(fs.existsSync(path.join(cwd,support)))files.push(support);
+    }
+  }
+  const unique=[...new Set(files.map(normalizePath).filter(Boolean))];
+  const filtered=unique.filter(file=>fs.existsSync(path.join(cwd,file))&&fs.statSync(path.join(cwd,file)).isFile()).filter(file=>!isIgnored(file,ignoreRules));
+  return{scope,base:base||null,head:head||null,files:filtered.sort(),fileCount:filtered.length,ignoredCount:unique.length-filtered.length,ignoreFiles:ignoreRules.files,commands};
+}
+function collectIncludedFiles(cwd,ignoreRules,roots){
+  const includePatterns=[...new Set(ignoreRules.rules.filter(rule=>rule.include).map(rule=>normalizePath(rule.pattern)).filter(Boolean))];
+  if(!includePatterns.length)return[];
+  const files=[];
+  for(const root of roots.length?roots:[""]){
+    const absoluteRoot=path.join(cwd,normalizePath(root));
+    for(const filePath of walkFiles(absoluteRoot)){
+      const relative=normalizePath(path.relative(cwd,filePath));
+      if(includePatterns.some(pattern=>matchesPattern(relative,pattern)))files.push(relative);
+    }
+  }
+  return files;
+}
 function resolveGitRange(options){if(options.base||options.head)return{base:options.base?String(options.base):undefined,head:options.head?String(options.head):"HEAD"};if(process.env.GITLAB_CI&&process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME)return{base:`origin/${process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME}`,head:process.env.CI_COMMIT_SHA||"HEAD"};if(process.env.GITHUB_BASE_REF)return{base:`origin/${process.env.GITHUB_BASE_REF}`,head:process.env.GITHUB_SHA||"HEAD"};return{base:undefined,head:undefined}}
 function buildIgnoreRules(cwd,gateKind,options){const files=[];const rules=[];for(const pattern of DEFAULT_IGNORES)rules.push({pattern,source:"defaults",include:false});const gateIgnoreFiles=gateKind==="semantic"?[SEMANTIC_IGNORE]:gateKind==="quality"?[QUALITY_IGNORE]:[QUALITY_IGNORE,SEMANTIC_IGNORE];const candidates=[...new Set([".gitignore",COMMON_IGNORE,...gateIgnoreFiles,...(options.ignoreFiles||[])].filter(Boolean))];for(const fileName of candidates){const filePath=path.resolve(cwd,fileName);if(!fs.existsSync(filePath)||!fs.statSync(filePath).isFile())continue;files.push(path.relative(cwd,filePath)||fileName);for(const rawLine of fs.readFileSync(filePath,"utf8").split(/\r?\n/)){const line=rawLine.trim();if(!line||line.startsWith("#"))continue;const include=line.startsWith("!");rules.push({pattern:include?line.slice(1):line,source:fileName,include})}}for(const pattern of options.excludes||[])rules.push({pattern,source:"--exclude",include:false});for(const pattern of options.includes||[])rules.push({pattern,source:"--include",include:true});return{rules,files}}
 function isIgnored(file,ignoreRules){let ignored=false;for(const rule of ignoreRules.rules){if(matchesPattern(file,rule.pattern))ignored=!rule.include}return ignored}

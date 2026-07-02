@@ -927,6 +927,9 @@ test("run does not activate configured baseline unless --baseline is passed", ()
     fs.writeFileSync(path.join(temp, ".code-approval-gates.json"), JSON.stringify({
       baseline: { path: ".quality/baseline/baseline.json" }
     }), "utf8");
+    run("git", ["init"], temp);
+    run("git", ["add", ".code-approval-gates.json"], temp);
+    run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"], temp);
 
     const result = spawnSync(process.execPath, [
       CLI,

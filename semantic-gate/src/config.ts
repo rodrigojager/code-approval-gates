@@ -212,7 +212,8 @@ function normalizeConfig(input: Record<string, unknown>, cliOptions: CliOptions 
   if (!["changed", "full", "paths"].includes(output.scope)) {
     throw new SemanticGateError("scope must be changed, full, or paths.", "usage");
   }
-  if (output.scope !== "paths" && cliOptions.paths && cliOptions.paths.length > 0) {
+  const cliPaths = Array.isArray(cliOptions.paths) ? cliOptions.paths : [];
+  if (output.scope !== "paths" && cliPaths.length > 0) {
     throw new SemanticGateError("--path can only be used with scope=paths.", "usage");
   }
   if (output.scope !== "paths") {
