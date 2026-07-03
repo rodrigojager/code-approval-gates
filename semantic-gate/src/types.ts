@@ -36,6 +36,9 @@ export interface SemanticGateConfig {
   apiKeyEnv?: string;
   apiKeyProvider?: string;
   reasoningEffort?: string;
+  codexSandbox: "read-only" | "workspace-write" | "danger-full-access" | undefined;
+  codexBypassSandbox: boolean;
+  codexSkipGitRepoCheck: boolean;
   command?: string;
   commandArgs?: string[];
   modelListCommand?: string;

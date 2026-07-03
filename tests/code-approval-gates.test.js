@@ -65,7 +65,12 @@ test("parseArgs supports unified scope, paths, ignores, and headless flags", () 
     "--no-quality",
     "--no-start-docker",
     "--docker-start-timeout-ms",
-    "5000"
+    "5000",
+    "--fix-network",
+    "--codex-sandbox",
+    "danger-full-access",
+    "--no-codex-bypass-sandbox",
+    "--codex-skip-git-repo-check"
   ]);
 
   assert.equal(parsed.command, "run");
@@ -83,10 +88,15 @@ test("parseArgs supports unified scope, paths, ignores, and headless flags", () 
   assert.equal(parsed.options.quality, false);
   assert.equal(parsed.options.noStartDocker, true);
   assert.equal(parsed.options.dockerStartTimeoutMs, 5000);
+  assert.equal(parsed.options.fixNetwork, true);
+  assert.equal(parsed.options.codexSandbox, "danger-full-access");
+  assert.equal(parsed.options.codexBypassSandbox, false);
+  assert.equal(parsed.options.codexSkipGitRepoCheck, true);
   assert.equal(parsed.options.passthrough.includes("--refresh"), false);
   assert.equal(parsed.options.passthrough.includes("--json"), false);
   assert.equal(parsed.options.passthrough.includes("--no-interactive"), false);
   assert.equal(parsed.options.passthrough.includes("--no-start-docker"), false);
+  assert.equal(parsed.options.passthrough.includes("--fix-network"), false);
 
   const globalFirst = parseArgs(["--cwd", "repo", "run", "--scope", "full", "--json"]);
   assert.equal(globalFirst.command, "run");
@@ -228,6 +238,7 @@ test("parseArgs keeps operational boolean flags out of passthrough", () => {
     "--interactive",
     "--non-blocking",
     "--fix",
+    "--fix-network",
     "--yes",
     "--install-global"
   ]);
@@ -236,10 +247,12 @@ test("parseArgs keeps operational boolean flags out of passthrough", () => {
   assert.equal(parsed.options.interactive, true);
   assert.equal(parsed.options.nonBlocking, true);
   assert.equal(parsed.options.fix, true);
+  assert.equal(parsed.options.fixNetwork, true);
   assert.equal(parsed.options.yes, true);
   assert.equal(parsed.options.installGlobal, true);
   assert.equal(parsed.options.passthrough.includes("--objective-stdin"), false);
   assert.equal(parsed.options.passthrough.includes("--non-blocking"), false);
+  assert.equal(parsed.options.passthrough.includes("--fix-network"), false);
   assert.equal(parsed.options.passthrough.includes("--yes"), false);
   assert.equal(parsed.options.passthrough.includes("--install-global"), false);
 });
@@ -359,6 +372,9 @@ test("buildEquivalentCommand includes baseline subcommand and semantic provider 
     provider: "codex-cli",
     model: "gpt-5.5",
     reasoningEffort: "high",
+    codexSandbox: "danger-full-access",
+    codexBypassSandbox: false,
+    codexSkipGitRepoCheck: true,
     json: true,
     noInteractive: true
   });
@@ -368,12 +384,16 @@ test("buildEquivalentCommand includes baseline subcommand and semantic provider 
   assert.match(semantic, /--provider codex-cli/);
   assert.match(semantic, /--model gpt-5.5/);
   assert.match(semantic, /--reasoning-effort high/);
+  assert.match(semantic, /--codex-sandbox danger-full-access/);
+  assert.match(semantic, /--no-codex-bypass-sandbox/);
+  assert.match(semantic, /--codex-skip-git-repo-check/);
   assert.match(semantic, /--json/);
   assert.match(semantic, /--no-interactive/);
 
   const doctor = buildEquivalentCommand("doctor", {
     focus: "semantic",
     fix: true,
+    fixNetwork: true,
     yes: true,
     installGlobal: true,
     json: true,
@@ -382,6 +402,7 @@ test("buildEquivalentCommand includes baseline subcommand and semantic provider 
 
   assert.match(doctor, /code-approval-gates doctor semantic/);
   assert.match(doctor, /--fix/);
+  assert.match(doctor, /--fix-network/);
   assert.match(doctor, /--yes/);
   assert.match(doctor, /--install-global/);
   assert.match(doctor, /--json/);
@@ -414,6 +435,9 @@ test("buildBaselineSourceScanArgs propagates source scan options", () => {
     provider: "codex-cli",
     model: "gpt-5.5",
     reasoningEffort: "high",
+    codexSandbox: "danger-full-access",
+    codexBypassSandbox: true,
+    codexSkipGitRepoCheck: false,
     objective: "Create release baseline",
     paths: ["src"],
     excludes: ["generated/**"],
@@ -430,6 +454,10 @@ test("buildBaselineSourceScanArgs propagates source scan options", () => {
   assert.ok(args.includes("gpt-5.5"));
   assert.ok(args.includes("--reasoning-effort"));
   assert.ok(args.includes("high"));
+  assert.ok(args.includes("--codex-sandbox"));
+  assert.ok(args.includes("danger-full-access"));
+  assert.ok(args.includes("--codex-bypass-sandbox"));
+  assert.ok(args.includes("--no-codex-skip-git-repo-check"));
   assert.ok(args.includes("--objective"));
   assert.ok(args.includes("Create release baseline"));
   assert.ok(args.includes("--path"));
@@ -516,6 +544,8 @@ test("help text lists all public commands and baseline scope flags", () => {
   const doctorHelp = helpFor("doctor");
 
   assert.match(doctorHelp, /installs semantic dependencies when missing/);
+  assert.match(doctorHelp, /--fix-network/);
+  assert.match(doctorHelp, /api\.openai\.com/);
   assert.match(doctorHelp, /--yes/);
   assert.match(doctorHelp, /Pre-approve fix\/install actions/);
   assert.match(doctorHelp, /code-approval-gates doctor semantic --ci --no-interactive/);

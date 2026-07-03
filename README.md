@@ -163,6 +163,16 @@ Objetivo semantico via stdin:
 "Avaliar arquitetura, qualidade e riscos" | code-approval-gates semantic --scope full --objective-stdin --json --no-interactive
 ```
 
+Com provider `codex-cli`, o Semantic Gate executa o Codex CLI com `--sandbox danger-full-access` e `--skip-git-repo-check` por padrao. Isso remove o sandbox interno do Codex para o processo do gate, mas nao consegue liberar uma rede bloqueada por um sandbox pai, VPN, proxy corporativo ou firewall externo.
+
+Overrides disponiveis:
+
+```powershell
+code-approval-gates semantic --codex-sandbox read-only
+code-approval-gates semantic --no-codex-skip-git-repo-check
+code-approval-gates semantic --codex-bypass-sandbox
+```
+
 ### Ignorando arquivos e diretorios
 
 A ferramenta usa ignores em estilo `.gitignore`.
@@ -275,6 +285,14 @@ Criar arquivos seguros que faltam:
 ```powershell
 code-approval-gates doctor --fix --yes
 ```
+
+Liberar acesso local do Codex/API no Windows, quando o bloqueio for firewall local:
+
+```powershell
+code-approval-gates doctor semantic --fix-network --yes
+```
+
+Esse comando exige PowerShell como Administrador. Se for tentado sem admin, o doctor retorna erro claro com o comando para repetir elevado. Ele cria regras outbound TCP 443 para o runtime Codex/Node e testa `api.openai.com:443`; nao salva credenciais e nao altera o CyberVinci.
 
 Reinstalar o pacote globalmente de forma explicita:
 
@@ -559,6 +577,16 @@ Semantic objective through stdin:
 "Review architecture, quality, and risks" | code-approval-gates semantic --scope full --objective-stdin --json --no-interactive
 ```
 
+With provider `codex-cli`, Semantic Gate runs Codex CLI with `--sandbox danger-full-access` and `--skip-git-repo-check` by default. This removes Codex's internal sandbox for the gate process, but it cannot unlock network blocked by a parent sandbox, VPN, corporate proxy, or external firewall.
+
+Available overrides:
+
+```powershell
+code-approval-gates semantic --codex-sandbox read-only
+code-approval-gates semantic --no-codex-skip-git-repo-check
+code-approval-gates semantic --codex-bypass-sandbox
+```
+
 ### Ignoring files and directories
 
 The tool supports gitignore-style ignore files.
@@ -671,6 +699,14 @@ Create safe missing files:
 ```powershell
 code-approval-gates doctor --fix --yes
 ```
+
+Allow local Codex/API access on Windows when the blocker is local firewall:
+
+```powershell
+code-approval-gates doctor semantic --fix-network --yes
+```
+
+This command requires Administrator PowerShell. If it is attempted without admin, doctor returns a clear error with the command to repeat elevated. It creates outbound TCP 443 rules for the Codex/Node runtime and checks `api.openai.com:443`; it does not save credentials or change CyberVinci.
 
 Explicitly reinstall the package globally:
 

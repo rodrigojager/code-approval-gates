@@ -219,6 +219,9 @@ async function commandProvider(request: ProviderRequest): Promise<ProviderRespon
     request.config.provider,
     request.config.model,
     request.config.reasoningEffort,
+    request.config.codexSandbox,
+    request.config.codexBypassSandbox,
+    request.config.codexSkipGitRepoCheck,
   );
   const command = request.config.command ?? defaults.command;
   if (!command) {
@@ -271,7 +274,8 @@ function classifyCommandProviderFailure(
       details: {
         ...details,
         classification: "provider-network",
-        advice: "Verify network/firewall/sandbox access to the provider API. This is different from an API credential failure.",
+        advice:
+          "Verify network/firewall/sandbox access to the provider API. This is different from an API credential failure. For local Windows Firewall with codex-cli, run code-approval-gates doctor semantic --fix-network --yes from Administrator PowerShell.",
       },
     };
   }
@@ -356,12 +360,15 @@ function defaultCommandConfigForProvider(
   provider: string | undefined,
   model: string | undefined,
   reasoningEffort: string | undefined,
+  codexSandbox: SemanticGateConfig["codexSandbox"],
+  codexBypassSandbox: boolean,
+  codexSkipGitRepoCheck: boolean,
 ): { command?: string; args?: string[]; promptMode?: "stdin" | "argument" } {
   switch (provider) {
     case "codex-cli":
       return {
         command: "codex",
-        args: codexCliArgs(model, reasoningEffort),
+        args: codexCliArgs(model, reasoningEffort, codexSandbox, codexBypassSandbox, codexSkipGitRepoCheck),
         promptMode: "stdin",
       };
     case "claude-code":
@@ -389,10 +396,24 @@ function defaultCommandConfigForProvider(
   }
 }
 
-function codexCliArgs(model: string | undefined, reasoningEffort: string | undefined): string[] {
+function codexCliArgs(
+  model: string | undefined,
+  reasoningEffort: string | undefined,
+  codexSandbox: SemanticGateConfig["codexSandbox"],
+  codexBypassSandbox: boolean,
+  codexSkipGitRepoCheck: boolean,
+): string[] {
   const args = ["exec"];
   if (model) {
     args.push("-m", model);
+  }
+  if (codexBypassSandbox) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else if (codexSandbox) {
+    args.push("--sandbox", codexSandbox);
+  }
+  if (codexSkipGitRepoCheck) {
+    args.push("--skip-git-repo-check");
   }
   if (reasoningEffort) {
     args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);

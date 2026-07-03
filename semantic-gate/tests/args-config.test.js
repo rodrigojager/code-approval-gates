@@ -20,6 +20,10 @@ test("parseCli keeps objective file and provider flags without shell-sensitive o
     "--model=anthropic/claude-sonnet-4",
     "--reasoning-effort",
     "high",
+    "--codex-sandbox",
+    "read-only",
+    "--codex-bypass-sandbox",
+    "--no-codex-skip-git-repo-check",
     "--json",
   ]);
 
@@ -28,6 +32,9 @@ test("parseCli keeps objective file and provider flags without shell-sensitive o
   assert.equal(parsed.options.provider, "openrouter");
   assert.equal(parsed.options.model, "anthropic/claude-sonnet-4");
   assert.equal(parsed.options.reasoningEffort, "high");
+  assert.equal(parsed.options.codexSandbox, "read-only");
+  assert.equal(parsed.options.codexBypassSandbox, true);
+  assert.equal(parsed.options.codexSkipGitRepoCheck, false);
   assert.equal(parsed.options.json, true);
 });
 
@@ -40,9 +47,13 @@ test("config precedence is flags over env over project over global", () => {
   const oldHome = process.env.SEMANTIC_GATE_HOME;
   const oldProvider = process.env.SEMANTIC_GATE_PROVIDER;
   const oldReasoningEffort = process.env.SEMANTIC_GATE_REASONING_EFFORT;
+  const oldCodexSandbox = process.env.SEMANTIC_GATE_CODEX_SANDBOX;
+  const oldCodexSkipGitRepoCheck = process.env.SEMANTIC_GATE_CODEX_SKIP_GIT_REPO_CHECK;
   process.env.SEMANTIC_GATE_HOME = home;
   process.env.SEMANTIC_GATE_PROVIDER = "anthropic";
   process.env.SEMANTIC_GATE_REASONING_EFFORT = "high";
+  process.env.SEMANTIC_GATE_CODEX_SANDBOX = "read-only";
+  process.env.SEMANTIC_GATE_CODEX_SKIP_GIT_REPO_CHECK = "false";
 
   try {
     writeConfigValue(project, "global", "provider", "openrouter");
@@ -57,11 +68,15 @@ test("config precedence is flags over env over project over global", () => {
     const envConfig = loadEffectiveConfig(project, {});
     assert.equal(envConfig.provider, "anthropic");
     assert.equal(envConfig.reasoningEffort, "high");
+    assert.equal(envConfig.codexSandbox, "read-only");
+    assert.equal(envConfig.codexSkipGitRepoCheck, false);
     assert.equal(envConfig.threshold, 91);
   } finally {
     restoreEnv("SEMANTIC_GATE_HOME", oldHome);
     restoreEnv("SEMANTIC_GATE_PROVIDER", oldProvider);
     restoreEnv("SEMANTIC_GATE_REASONING_EFFORT", oldReasoningEffort);
+    restoreEnv("SEMANTIC_GATE_CODEX_SANDBOX", oldCodexSandbox);
+    restoreEnv("SEMANTIC_GATE_CODEX_SKIP_GIT_REPO_CHECK", oldCodexSkipGitRepoCheck);
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
@@ -96,6 +111,8 @@ test("status shows effective provider model threshold and config paths", () => {
     assert.match(text.stdout, /Provider: codex-cli/);
     assert.match(text.stdout, /Model: gpt-5\.5/);
     assert.match(text.stdout, /Threshold: 93/);
+    assert.match(text.stdout, /Codex sandbox: danger-full-access/);
+    assert.match(text.stdout, /Codex skip git repo check: true/);
     assert.match(text.stdout, /Credential: not required/);
 
     const json = spawnSync(process.execPath, [CLI, "status", "--json"], {
@@ -111,6 +128,8 @@ test("status shows effective provider model threshold and config paths", () => {
     assert.equal(parsed.provider, "codex-cli");
     assert.equal(parsed.model, "gpt-5.5");
     assert.equal(parsed.threshold, 93);
+    assert.equal(parsed.codexSandbox, "danger-full-access");
+    assert.equal(parsed.codexSkipGitRepoCheck, true);
     assert.equal(parsed.credential.source, "not-required");
     assert.equal(parsed.configFiles.project, path.join(project, ".semantic-gate.json"));
   } finally {

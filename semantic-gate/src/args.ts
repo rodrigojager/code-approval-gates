@@ -15,6 +15,10 @@ const booleanFlags = new Set([
   "key-stdin",
   "verify",
   "no-verify",
+  "codex-bypass-sandbox",
+  "no-codex-bypass-sandbox",
+  "codex-skip-git-repo-check",
+  "no-codex-skip-git-repo-check",
 ]);
 
 const keyMap: Record<string, string> = {
@@ -34,6 +38,11 @@ const keyMap: Record<string, string> = {
   "api-key-env": "apiKeyEnv",
   "api-key-provider": "apiKeyProvider",
   "reasoning-effort": "reasoningEffort",
+  "codex-sandbox": "codexSandbox",
+  "codex-bypass-sandbox": "codexBypassSandbox",
+  "no-codex-bypass-sandbox": "codexBypassSandbox",
+  "codex-skip-git-repo-check": "codexSkipGitRepoCheck",
+  "no-codex-skip-git-repo-check": "codexSkipGitRepoCheck",
   "key-stdin": "keyStdin",
   "command-args": "commandArgs",
   "model-list-command": "modelListCommand",

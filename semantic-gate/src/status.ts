@@ -31,6 +31,9 @@ export interface StatusSummary {
   base: string | null;
   head: string | null;
   baseUrl: string | null;
+  codexSandbox: string | null;
+  codexBypassSandbox: boolean;
+  codexSkipGitRepoCheck: boolean;
   command: string | null;
   commandArgs: string[] | null;
   commandPromptMode: string;
@@ -66,6 +69,9 @@ export function buildStatusSummary(cwd: string, config: SemanticGateConfig): Sta
     base: config.base ?? null,
     head: config.head ?? null,
     baseUrl: config.baseUrl ?? null,
+    codexSandbox: config.codexSandbox ?? null,
+    codexBypassSandbox: config.codexBypassSandbox,
+    codexSkipGitRepoCheck: config.codexSkipGitRepoCheck,
     command: config.command ?? null,
     commandArgs: config.commandArgs ?? null,
     commandPromptMode: config.commandPromptMode,
@@ -104,6 +110,9 @@ export function renderStatus(summary: StatusSummary): string {
     `Base ref: ${summary.base ?? "(working tree)"}`,
     `Head ref: ${summary.head ?? "(working tree)"}`,
     `Base URL: ${summary.baseUrl ?? "(default/provider local)"}`,
+    `Codex sandbox: ${summary.codexSandbox ?? "(disabled/custom command)"}`,
+    `Codex bypass sandbox: ${formatBoolean(summary.codexBypassSandbox)}`,
+    `Codex skip git repo check: ${formatBoolean(summary.codexSkipGitRepoCheck)}`,
     `Command: ${summary.command ?? "(provider default)"}`,
     `Command args: ${summary.commandArgs ? JSON.stringify(summary.commandArgs) : "(provider default)"}`,
     `Command prompt mode: ${summary.commandPromptMode}`,

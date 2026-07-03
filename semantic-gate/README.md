@@ -26,6 +26,8 @@ GitLab CI:
 code-approval-gates semantic --ci --scope changed --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --format json,md --output code-approval-report --no-interactive
 ```
 
+When `--provider codex-cli` is used, the provider command runs Codex CLI with `--sandbox danger-full-access` and `--skip-git-repo-check` by default. Override with `--codex-sandbox read-only`, `--codex-sandbox workspace-write`, `--no-codex-skip-git-repo-check`, or `--codex-bypass-sandbox` when needed.
+
 The lower-level binary is still available for advanced/debug use and compatibility. Prefer `code-approval-gates semantic` for users, agents, and CI:
 
 ```powershell

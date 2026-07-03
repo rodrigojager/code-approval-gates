@@ -4,6 +4,7 @@ const fs=require("node:fs");
 const path=require("node:path");
 const process=require("node:process");
 const readline=require("node:readline");
+const crypto=require("node:crypto");
 const {spawn,spawnSync}=require("node:child_process");
 const VERSION="0.1.0";
 const ROOT=path.resolve(__dirname,"..");
@@ -22,11 +23,65 @@ const QUALITY_IGNORE=".quality-gate.ignore";
 const SEMANTIC_IGNORE=".semantic-gate.ignore";
 const DEFAULT_IGNORES=[".git/",".quality/","node_modules/","dist/","build/","coverage/",".turbo/",".vite/","__pycache__/","*.pyc","*.pyo","*.log","*.sqlite","*.sqlite3","*.db"];
 const SUPPORT_FILES=["package.json","package-lock.json","pnpm-lock.yaml","yarn.lock","bun.lockb","tsconfig.json","jsconfig.json","pyproject.toml","requirements.txt","poetry.lock","Dockerfile","docker-compose.yml","docker-compose.yaml",".gitignore",".eslintrc",".eslintrc.json",".prettierrc",".markdownlint.json",".stylelintrc","README.md"];
-const BOOL_FLAGS=new Set(["ci","json","interactive","no-interactive","objective-stdin","fix","yes","install-global","non-blocking","no-quality","no-semantic","quality","semantic","pull","no-pull","build","no-build","debug-docker","enable-coverage","enable-secrets","enable-pii","disable-iac","no-iac","allow-pii","allow-secrets","include-untracked","write-reports","no-write-reports","refresh","version","help","progress","no-progress","start-docker","no-start-docker"]);
+const BOOL_FLAGS=new Set(["ci","json","interactive","no-interactive","objective-stdin","fix","fix-network","yes","install-global","non-blocking","no-quality","no-semantic","quality","semantic","pull","no-pull","build","no-build","debug-docker","enable-coverage","enable-secrets","enable-pii","disable-iac","no-iac","allow-pii","allow-secrets","include-untracked","write-reports","no-write-reports","refresh","version","help","progress","no-progress","start-docker","no-start-docker","codex-bypass-sandbox","no-codex-bypass-sandbox","codex-skip-git-repo-check","no-codex-skip-git-repo-check"]);
 const MULTI_FLAGS=new Set(["path","exclude","include","ignore-file","docker-arg","allow-rule","allow-path","waiver","coverage-report"]);
-const KEY_MAP={"no-interactive":"noInteractive","objective-file":"objectiveFile","objective-stdin":"objectiveStdin","non-blocking":"nonBlocking","no-quality":"quality","no-semantic":"semantic","ignore-file":"ignoreFiles","base-url":"baseUrl","api-key-env":"apiKeyEnv","api-key-provider":"apiKeyProvider","reasoning-effort":"reasoningEffort","output-dir":"outputDir","report-dir":"reportDir","max-context-chars":"maxContextChars","max-file-chars":"maxFileChars","max-diff-chars":"maxDiffChars","context-strategy":"contextStrategy","timeout-ms":"timeoutMs","command-args":"commandArgs","model-list-command":"modelListCommand","model-list-args":"modelListArgs","command-prompt-mode":"commandPromptMode","command-output":"commandOutput","fail-on-tool-error":"failOnToolError","min-line-coverage":"minLineCoverage","min-branch-coverage":"minBranchCoverage","docker-start-timeout-ms":"dockerStartTimeoutMs","docker-arg":"dockerArgs","allow-rule":"allowRules","allow-path":"allowPaths","coverage-report":"coverageReports"};
+const KEY_MAP={"no-interactive":"noInteractive","objective-file":"objectiveFile","objective-stdin":"objectiveStdin","non-blocking":"nonBlocking","fix-network":"fixNetwork","no-quality":"quality","no-semantic":"semantic","ignore-file":"ignoreFiles","base-url":"baseUrl","api-key-env":"apiKeyEnv","api-key-provider":"apiKeyProvider","reasoning-effort":"reasoningEffort","codex-sandbox":"codexSandbox","codex-bypass-sandbox":"codexBypassSandbox","no-codex-bypass-sandbox":"codexBypassSandbox","codex-skip-git-repo-check":"codexSkipGitRepoCheck","no-codex-skip-git-repo-check":"codexSkipGitRepoCheck","output-dir":"outputDir","report-dir":"reportDir","max-context-chars":"maxContextChars","max-file-chars":"maxFileChars","max-diff-chars":"maxDiffChars","context-strategy":"contextStrategy","timeout-ms":"timeoutMs","command-args":"commandArgs","model-list-command":"modelListCommand","model-list-args":"modelListArgs","command-prompt-mode":"commandPromptMode","command-output":"commandOutput","fail-on-tool-error":"failOnToolError","min-line-coverage":"minLineCoverage","min-branch-coverage":"minBranchCoverage","docker-start-timeout-ms":"dockerStartTimeoutMs","docker-arg":"dockerArgs","allow-rule":"allowRules","allow-path":"allowPaths","coverage-report":"coverageReports"};
 async function main(argv=process.argv.slice(2)){const parsed=parseArgs(argv);const cwd=path.resolve(String(parsed.options.cwd||process.cwd()));const mode=detectExecutionMode(parsed.options);if(parsed.options.version||parsed.command==="version"){writeHumanOrJson(parsed.options,{version:VERSION},`code-approval-gates ${VERSION}\n`);return 0}if(parsed.options.help||parsed.command==="help"){const helpCommand=resolveHelpCommand(parsed);const helpText=helpFor(helpCommand);writeHumanOrJson(parsed.options,helpPayloadFor(helpCommand,helpText),helpText);return 0}if(!parsed.command){if(mode.interactive)return runWizard(cwd,parsed.options);if(parsed.options.json)return fail(parsed.options,2,"MISSING_COMMAND","No command provided in headless mode.","Use code-approval-gates run --scope changed --json --no-interactive, or code-approval-gates --help.");process.stdout.write(helpFor("root"));return 0}switch(parsed.command){case"wizard":if(mode.interactive)return runWizard(cwd,{...parsed.options,interactive:true});return fail(parsed.options,2,"INTERACTIVE_UNAVAILABLE","Interactive wizard cannot run in headless mode.","Use command flags with --no-interactive, or run in a TTY without --ci/--json.");case"init":return handleInit(cwd,parsed.options);case"doctor":return handleDoctor(cwd,parsed);case"run":if(parsed.options.interactive&&mode.interactive)return runWizard(cwd,parsed.options);return handleRun(cwd,parsed.options,"both");case"quality":return handleRun(cwd,{...parsed.options,semantic:false,quality:true},"quality");case"semantic":return handleRun(cwd,{...parsed.options,semantic:true,quality:false},"semantic");case"baseline":return handleBaseline(cwd,parsed);case"report":return handleReport(cwd,parsed);case"config":return handleConfig(cwd,parsed);default:return fail(parsed.options,2,"UNKNOWN_COMMAND",`Unknown command: ${parsed.command}`,"Use code-approval-gates --help.")}}
-function parseArgs(argv){const tokens=[...argv];const options={paths:[],excludes:[],includes:[],ignoreFiles:[],passthrough:[]};let command;const positional=[];for(let index=0;index<tokens.length;index++){const token=tokens[index];if(token==="--"){options.passthrough.push(...tokens.slice(index+1));break}if(!token.startsWith("-")){if(!command){command=token;continue}positional.push(token);continue}if(token==="-h"||token==="--help"){options.help=true;continue}if(token==="-v"||token==="--version"){options.version=true;continue}const withoutPrefix=token.replace(/^--?/,"");const eq=withoutPrefix.indexOf("=");const rawFlag=eq>=0?withoutPrefix.slice(0,eq):withoutPrefix;const explicitValue=eq>=0?withoutPrefix.slice(eq+1):undefined;const mapped=KEY_MAP[rawFlag]||toCamel(rawFlag);if(MULTI_FLAGS.has(rawFlag)){const value=explicitValue!==undefined?explicitValue:tokens[++index];if(value===undefined)throwUsage(`Missing value for --${rawFlag}`);pushOption(options,mapped,value);continue}if(BOOL_FLAGS.has(rawFlag)){const value=explicitValue===undefined?true:parseScalar(explicitValue);if(rawFlag==="no-quality"||rawFlag==="no-semantic")options[mapped]=false;else options[mapped]=value;continue}const value=explicitValue!==undefined?explicitValue:tokens[index+1];if(value===undefined||(explicitValue===undefined&&value.startsWith("--"))){options[mapped]=true;options.passthrough.push(token);continue}if(explicitValue===undefined)index++;options[mapped]=parseScalar(value)}return{command,positional,options}}
+function parseArgs(argv){
+  const tokens=[...argv];
+  const options={paths:[],excludes:[],includes:[],ignoreFiles:[],passthrough:[]};
+  let command;
+  const positional=[];
+  for(let index=0;index<tokens.length;index++){
+    const token=tokens[index];
+    if(token==="--"){
+      options.passthrough.push(...tokens.slice(index+1));
+      break;
+    }
+    if(!token.startsWith("-")){
+      if(!command){
+        command=token;
+        continue;
+      }
+      positional.push(token);
+      continue;
+    }
+    if(token==="-h"||token==="--help"){
+      options.help=true;
+      continue;
+    }
+    if(token==="-v"||token==="--version"){
+      options.version=true;
+      continue;
+    }
+    const withoutPrefix=token.replace(/^--?/,"");
+    const eq=withoutPrefix.indexOf("=");
+    const rawFlag=eq>=0?withoutPrefix.slice(0,eq):withoutPrefix;
+    const explicitValue=eq>=0?withoutPrefix.slice(eq+1):undefined;
+    const mapped=KEY_MAP[rawFlag]||toCamel(rawFlag);
+    if(MULTI_FLAGS.has(rawFlag)){
+      const value=explicitValue!==undefined?explicitValue:tokens[++index];
+      if(value===undefined)throwUsage(`Missing value for --${rawFlag}`);
+      pushOption(options,mapped,value);
+      continue;
+    }
+    if(BOOL_FLAGS.has(rawFlag)){
+      const value=explicitValue===undefined?true:parseScalar(explicitValue);
+      if(rawFlag==="no-quality"||rawFlag==="no-semantic"||rawFlag==="no-codex-bypass-sandbox"||rawFlag==="no-codex-skip-git-repo-check")options[mapped]=false;
+      else options[mapped]=value;
+      continue;
+    }
+    const value=explicitValue!==undefined?explicitValue:tokens[index+1];
+    if(value===undefined||(explicitValue===undefined&&value.startsWith("--"))){
+      options[mapped]=true;
+      options.passthrough.push(token);
+      continue;
+    }
+    if(explicitValue===undefined)index++;
+    options[mapped]=parseScalar(value);
+  }
+  return{command,positional,options};
+}
 function pushOption(options,mapped,value){if(mapped==="path"){options.paths.push(value);return}if(mapped==="exclude"){options.excludes.push(value);return}if(mapped==="include"){options.includes.push(value);return}if(!Array.isArray(options[mapped]))options[mapped]=[];options[mapped].push(value)}
 function parseScalar(value){const text=String(value);if(text==="true")return true;if(text==="false")return false;if(text==="null")return null;if(/^-?\d+(\.\d+)?$/.test(text))return Number(text);return value}
 function toCamel(value){return value.replace(/-([a-z])/g,(_,c)=>c.toUpperCase())}
@@ -139,7 +194,42 @@ function globRegex(pattern){let out="^";for(let i=0;i<pattern.length;i++){const 
 function escapeRegex(char){return char.replace(/[|\\{}()[\]^$+*?.]/g,"\\$&")}
 function normalizePath(value){return String(value||"").replace(/\\/g,"/").replace(/^\.\//,"").replace(/^\/+/,"")}
 function walkFiles(root){if(!fs.existsSync(root))return[];const stat=fs.statSync(root);if(stat.isFile())return[root];const files=[];const stack=[root];while(stack.length){const current=stack.pop();for(const entry of fs.readdirSync(current,{withFileTypes:true})){const full=path.join(current,entry.name);if(entry.isDirectory()){if([".git","node_modules",".quality"].includes(entry.name))continue;stack.push(full)}else if(entry.isFile())files.push(full)}}return files}
-async function runSemanticGate(workspace,outputDir,options,mode){const objective=readObjective(options,workspace);const semanticOutputDir=path.join(outputDir,"semantic-native");const semanticTimeoutMs=Number(options.timeoutMs||options.semanticConfig?.timeoutMs||DEFAULT_SEMANTIC_TIMEOUT_MS);const args=[SEMANTIC_BIN,"run","--objective-stdin","--include-untracked","--scope",options.scope,"--output-dir",semanticOutputDir,"--json"];appendScopeOptions(args,options);appendSemanticOption(args,"base",options.base);appendSemanticOption(args,"head",options.head);appendSemanticOption(args,"provider",options.provider||options.semanticConfig?.provider);appendSemanticOption(args,"model",options.model||options.semanticConfig?.model);appendSemanticOption(args,"reasoning-effort",options.reasoningEffort||options.semanticConfig?.reasoningEffort);appendSemanticOption(args,"timeout-ms",semanticTimeoutMs);appendSemanticOption(args,"max-context-chars",options.maxContextChars);appendSemanticOption(args,"max-file-chars",options.maxFileChars);appendSemanticOption(args,"max-diff-chars",options.maxDiffChars);appendSemanticOption(args,"context-strategy",options.contextStrategy);appendSemanticOption(args,"base-url",options.baseUrl);appendSemanticOption(args,"api-key-env",options.apiKeyEnv);const provider=String(options.provider||options.semanticConfig?.provider||"codex-cli");const model=String(options.model||options.semanticConfig?.model||"");const result=await runGateProcess(process.execPath,args,{cwd:workspace,input:objective,timeout:semanticTimeoutMs+60000,stdio:mode.headless?["pipe","pipe","pipe"]:["pipe","inherit","inherit"]},progressOptions("semantic",`${provider}${model?`/${model}`:""}`,semanticTimeoutMs,options,mode));const sourceDir=semanticOutputDir;const semanticJson=copyIfExists(path.join(sourceDir,"semantic-result.json"),path.join(outputDir,"semantic-report.json"));const semanticMarkdown=copyIfExists(path.join(sourceDir,"semantic-result.md"),path.join(outputDir,"semantic-report.md"));copyDirIfExists(path.join(sourceDir,"raw-provider-output.json"),path.join(outputDir,"raw","semantic","raw-provider-output.json"));const report=semanticJson&&fs.existsSync(semanticJson)?readJson(semanticJson):null;return{gate:{name:"semantic",command:commandForDisplay(process.execPath,args),exitCode:result.status??5,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score:typeof report?.score==="number"?report.score:null,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score:typeof report?.score==="number"?report.score:null,semanticJson,semanticMarkdown,error:result.status===0?null:{code:"SEMANTIC_GATE_FAILED",message:trimLog(result.stderr||result.stdout||"Semantic gate failed."),exitCode:result.status??5}}}
+async function runSemanticGate(workspace,outputDir,options,mode){
+  const objective=readObjective(options,workspace);
+  const semanticOutputDir=path.join(outputDir,"semantic-native");
+  const semanticTimeoutMs=Number(options.timeoutMs||options.semanticConfig?.timeoutMs||DEFAULT_SEMANTIC_TIMEOUT_MS);
+  const args=[SEMANTIC_BIN,"run","--objective-stdin","--include-untracked","--scope",options.scope,"--output-dir",semanticOutputDir,"--json"];
+  appendScopeOptions(args,options);
+  appendSemanticOption(args,"base",options.base);
+  appendSemanticOption(args,"head",options.head);
+  appendSemanticOption(args,"provider",options.provider||options.semanticConfig?.provider);
+  appendSemanticOption(args,"model",options.model||options.semanticConfig?.model);
+  appendSemanticOption(args,"reasoning-effort",options.reasoningEffort||options.semanticConfig?.reasoningEffort);
+  appendSemanticOption(args,"timeout-ms",semanticTimeoutMs);
+  appendSemanticOption(args,"max-context-chars",options.maxContextChars);
+  appendSemanticOption(args,"max-file-chars",options.maxFileChars);
+  appendSemanticOption(args,"max-diff-chars",options.maxDiffChars);
+  appendSemanticOption(args,"context-strategy",options.contextStrategy);
+  appendSemanticOption(args,"base-url",options.baseUrl);
+  appendSemanticOption(args,"api-key-env",options.apiKeyEnv);
+  const codexSandbox=options.codexSandbox??options.semanticConfig?.codexSandbox??"danger-full-access";
+  const codexBypassSandbox=options.codexBypassSandbox??options.semanticConfig?.codexBypassSandbox;
+  const codexSkipGitRepoCheck=options.codexSkipGitRepoCheck??options.semanticConfig?.codexSkipGitRepoCheck??true;
+  appendSemanticOption(args,"codex-sandbox",codexSandbox);
+  if(codexBypassSandbox===true)args.push("--codex-bypass-sandbox");
+  else if(codexBypassSandbox===false)args.push("--no-codex-bypass-sandbox");
+  if(codexSkipGitRepoCheck===true)args.push("--codex-skip-git-repo-check");
+  else if(codexSkipGitRepoCheck===false)args.push("--no-codex-skip-git-repo-check");
+  const provider=String(options.provider||options.semanticConfig?.provider||"codex-cli");
+  const model=String(options.model||options.semanticConfig?.model||"");
+  const result=await runGateProcess(process.execPath,args,{cwd:workspace,input:objective,timeout:semanticTimeoutMs+60000,stdio:mode.headless?["pipe","pipe","pipe"]:["pipe","inherit","inherit"]},progressOptions("semantic",`${provider}${model?`/${model}`:""}`,semanticTimeoutMs,options,mode));
+  const sourceDir=semanticOutputDir;
+  const semanticJson=copyIfExists(path.join(sourceDir,"semantic-result.json"),path.join(outputDir,"semantic-report.json"));
+  const semanticMarkdown=copyIfExists(path.join(sourceDir,"semantic-result.md"),path.join(outputDir,"semantic-report.md"));
+  copyDirIfExists(path.join(sourceDir,"raw-provider-output.json"),path.join(outputDir,"raw","semantic","raw-provider-output.json"));
+  const report=semanticJson&&fs.existsSync(semanticJson)?readJson(semanticJson):null;
+  return{gate:{name:"semantic",command:commandForDisplay(process.execPath,args),exitCode:result.status??5,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score:typeof report?.score==="number"?report.score:null,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score:typeof report?.score==="number"?report.score:null,semanticJson,semanticMarkdown,error:result.status===0?null:{code:"SEMANTIC_GATE_FAILED",message:trimLog(result.stderr||result.stdout||"Semantic gate failed."),exitCode:result.status??5}};
+}
 function appendSemanticOption(args,key,value){if(value===undefined||value===null||value==="")return;args.push(`--${key}`,String(value))}
 function appendScopeOptions(args,options){if(String(options.scope||"full")==="paths")for(const item of options.paths||[])args.push("--path",item);for(const item of options.excludes||[])args.push("--exclude",item);for(const item of options.includes||[])args.push("--include",item);for(const item of options.ignoreFiles||[])args.push("--ignore-file",item)}
 async function runQualityGate(workspace,outputDir,options,mode){
@@ -219,14 +309,75 @@ function writeSummary(outputDir,summary,options){fs.mkdirSync(outputDir,{recursi
 function renderSummaryMarkdown(summary){return `# Code Approval Gates Report\n\nStatus: ${summary.status}\nScope: ${summary.scope}\nScore applies to: ${summary.scoreAppliesTo||"n/a"}\nMode: ${summary.mode}\nThreshold: ${summary.threshold}\nFinal score: ${summary.finalScore??"n/a"}\nQuality score: ${summary.qualityScore??"n/a"}\nSemantic score: ${summary.semanticScore??"n/a"}\nFiles analyzed: ${summary.scopeResolution?.fileCount??0}\nIgnored files: ${summary.scopeResolution?.ignoredCount??0}\n\n## Command\n\n\`\`\`bash\n${summary.commandEquivalent}\n\`\`\`\n\n## Reports\n\n- Summary JSON: ${summary.reports.summaryJson||"n/a"}\n- Quality JSON: ${summary.reports.qualityJson||"n/a"}\n- Semantic JSON: ${summary.reports.semanticJson||"n/a"}\n\n## Gates\n\n${summary.gates.map(gate=>`- ${gate.name}: ${gate.status} score=${gate.score??"n/a"} exit=${gate.exitCode}`).join("\n")||"- None"}\n\n## Errors\n\n${summary.errors.length?summary.errors.map(error=>`- ${error.code}: ${error.message}`).join("\n"):"- None"}\n`}
 function exitWithSummary(summary,options,code){if(options.json)process.stdout.write(`${JSON.stringify(summary,null,2)}\n`);else process.stdout.write(renderSummaryMarkdown(summary));return code}
 function handleBaseline(cwd,parsed){const subcommand=parsed.positional[0]||"help";const baselineRawOptions=subcommand==="create"&&!parsed.options.scope?{...parsed.options,scope:"full"}:parsed.options;const options=normalizedOptions(cwd,baselineRawOptions);const baselineTarget=String(parsed.options.baseline||parsed.options.output||options.baseline?.path||DEFAULT_BASELINE_OUTPUT);const baselinePath=path.resolve(cwd,baselineTarget);if(subcommand==="create"){const reportOutput=String(parsed.options.reportOutput||DEFAULT_BASELINE_REPORT_OUTPUT);const reportPath=path.resolve(cwd,String(parsed.options.fromReport||path.join(reportOutput,"summary.json")));let scan=null;if(!parsed.options.fromReport&&(parsed.options.refresh||!fs.existsSync(reportPath))){scan=runBaselineSourceScan(cwd,{...options,...parsed.options,scope:options.scope||"full",output:reportOutput,format:parsed.options.format||options.format||"json,md",noInteractive:true,nonBlocking:true});}if(!fs.existsSync(reportPath)){return fail(options,4,"BASELINE_SOURCE_MISSING",`Baseline source report not found: ${reportPath}`,"Run code-approval-gates run --scope full first, pass --from-report <summary.json>, or rerun baseline create without --from-report so it can generate a source scan.");}const source=readJson(reportPath);const baseline=buildBaseline(source,cwd,options);baseline.sourceReport=reportPath;if(scan)baseline.sourceScan=scan;fs.mkdirSync(path.dirname(baselinePath),{recursive:true});fs.writeFileSync(baselinePath,`${JSON.stringify(baseline,null,2)}\n`,"utf8");writeHumanOrJson(options,baseline,`Baseline created: ${baselinePath}\nSource report: ${reportPath}\nFindings: ${baseline.findings.length}\n`);return 0}if(subcommand==="check"){const baseline=loadBaseline(baselinePath);writeHumanOrJson(options,baseline,`Baseline: ${baseline.findings.length} findings\nCreated at: ${baseline.createdAt}\n`);return 0}return fail(options,2,"UNKNOWN_BASELINE_COMMAND",`Unknown baseline command: ${subcommand}`,"Use code-approval-gates baseline create|check.")}
-function buildBaselineSourceScanArgs(options){const args=[__filename,"run","--scope",String(options.scope||"full"),"--format",String(options.format||"json,md"),"--output",String(options.output||DEFAULT_BASELINE_REPORT_OUTPUT),"--threshold",String(options.threshold||DEFAULT_THRESHOLD),"--no-interactive","--non-blocking"];const semanticEnabled=!(options.noSemantic||options.semantic===false);if(options.json)args.push("--json");if(options.noSemantic||options.semantic===false)args.push("--no-semantic");if(options.noQuality||options.quality===false)args.push("--no-quality");if(semanticEnabled&&options.provider)args.push("--provider",String(options.provider));if(semanticEnabled&&options.model)args.push("--model",String(options.model));if(semanticEnabled&&options.reasoningEffort)args.push("--reasoning-effort",String(options.reasoningEffort));if(semanticEnabled&&options.objective)args.push("--objective",String(options.objective));if(semanticEnabled&&options.objectiveFile)args.push("--objective-file",String(options.objectiveFile));if(semanticEnabled&&options.objectiveStdin)args.push("--objective-stdin");if(String(options.scope||"full")==="paths")for(const item of options.paths||[])args.push("--path",item);for(const item of options.excludes||[])args.push("--exclude",item);for(const item of options.includes||[])args.push("--include",item);for(const item of options.ignoreFiles||[])args.push("--ignore-file",item);return args}
+function buildBaselineSourceScanArgs(options){
+  const args=[__filename,"run","--scope",String(options.scope||"full"),"--format",String(options.format||"json,md"),"--output",String(options.output||DEFAULT_BASELINE_REPORT_OUTPUT),"--threshold",String(options.threshold||DEFAULT_THRESHOLD),"--no-interactive","--non-blocking"];
+  const semanticEnabled=!(options.noSemantic||options.semantic===false);
+  if(options.json)args.push("--json");
+  if(options.noSemantic||options.semantic===false)args.push("--no-semantic");
+  if(options.noQuality||options.quality===false)args.push("--no-quality");
+  if(semanticEnabled&&options.provider)args.push("--provider",String(options.provider));
+  if(semanticEnabled&&options.model)args.push("--model",String(options.model));
+  if(semanticEnabled&&options.reasoningEffort)args.push("--reasoning-effort",String(options.reasoningEffort));
+  if(semanticEnabled&&options.codexSandbox)args.push("--codex-sandbox",String(options.codexSandbox));
+  if(semanticEnabled&&options.codexBypassSandbox===true)args.push("--codex-bypass-sandbox");
+  if(semanticEnabled&&options.codexBypassSandbox===false)args.push("--no-codex-bypass-sandbox");
+  if(semanticEnabled&&options.codexSkipGitRepoCheck===true)args.push("--codex-skip-git-repo-check");
+  if(semanticEnabled&&options.codexSkipGitRepoCheck===false)args.push("--no-codex-skip-git-repo-check");
+  if(semanticEnabled&&options.objective)args.push("--objective",String(options.objective));
+  if(semanticEnabled&&options.objectiveFile)args.push("--objective-file",String(options.objectiveFile));
+  if(semanticEnabled&&options.objectiveStdin)args.push("--objective-stdin");
+  if(String(options.scope||"full")==="paths")for(const item of options.paths||[])args.push("--path",item);
+  for(const item of options.excludes||[])args.push("--exclude",item);
+  for(const item of options.includes||[])args.push("--include",item);
+  for(const item of options.ignoreFiles||[])args.push("--ignore-file",item);
+  return args;
+}
 function runBaselineSourceScan(cwd,options){const semanticEnabled=!(options.noSemantic||options.semantic===false);const childOptions=options.objectiveStdin?semanticEnabled?{...options,objective:fs.readFileSync(0,"utf8"),objectiveStdin:false}:{...options,objectiveStdin:false}:options;const args=buildBaselineSourceScanArgs(childOptions);const result=spawnSync(process.execPath,args,{cwd,encoding:"utf8",errors:"replace",timeout:Number(options.baselineTimeoutMs||0)||undefined,stdio:options.json?"pipe":"inherit"});return{command:commandForDisplay(process.execPath,args),exitCode:result.status??null,stdout:options.json?trimLog(result.stdout):undefined,stderr:options.json?trimLog(result.stderr):undefined}}
 function buildBaseline(summary,cwd,options){const findings=[];if(summary?.reports?.qualityJson&&fs.existsSync(summary.reports.qualityJson))findings.push(...extractFindingFingerprints(readJson(summary.reports.qualityJson),"quality"));if(summary?.reports?.semanticJson&&fs.existsSync(summary.reports.semanticJson))findings.push(...extractFindingFingerprints(readJson(summary.reports.semanticJson),"semantic"));return{schemaVersion:1,createdAt:new Date().toISOString(),cwd,scope:options.scope,findings:[...new Map(findings.map(item=>[item.fingerprint,item])).values()]}}
 function loadBaseline(filePath){if(!fs.existsSync(filePath))throwUsage(`Baseline not found: ${filePath}`);return readJson(filePath)}
 function compareBaseline(baseline,summary){const current=[];if(summary.reports.qualityJson&&fs.existsSync(summary.reports.qualityJson))current.push(...extractFindingFingerprints(readJson(summary.reports.qualityJson),"quality"));if(summary.reports.semanticJson&&fs.existsSync(summary.reports.semanticJson))current.push(...extractFindingFingerprints(readJson(summary.reports.semanticJson),"semantic"));const baseSet=new Set((baseline.findings||[]).map(item=>item.fingerprint));const currentSet=new Set(current.map(item=>item.fingerprint));return{baselineCount:baseSet.size,currentCount:currentSet.size,newFindingsCount:current.filter(item=>!baseSet.has(item.fingerprint)).length,existingFindingsCount:current.filter(item=>baseSet.has(item.fingerprint)).length,resolvedFindingsCount:[...baseSet].filter(fingerprint=>!currentSet.has(fingerprint)).length}}
 function extractFindingFingerprints(report,gate){const findings=Array.isArray(report?.findings)?report.findings:[];return findings.map(finding=>{const pathValue=finding.path||finding.file||finding.location?.path||"";const rule=finding.rule||finding.ruleId||finding.category||finding.tool||"";const line=finding.line||finding.location?.line||"";const message=finding.message||finding.title||finding.requiredFix||"";const fingerprint=[gate,finding.tool||"",rule,pathValue,line,message].join("|");return{gate,fingerprint,path:pathValue,rule,line,message}})}
 function handleInit(cwd,options){const created=ensureDefaultProjectFiles(cwd,options.fix!==false);writeHumanOrJson(options,{status:"OK",created},`Initialized Code Approval Gates\n${created.map(item=>`- ${item}`).join("\n")}\n`);return 0}
-function ensureDefaultProjectFiles(cwd,allowCreate=true){const created=[];const files={[DEFAULT_CONFIG]:JSON.stringify({threshold:DEFAULT_THRESHOLD,defaultScope:"changed",paths:[],excludes:[],includes:[],ignoreFiles:[],format:"json,md",output:DEFAULT_OUTPUT,quality:{enabled:true},semantic:{enabled:true,provider:"codex-cli",model:"gpt-5.5",reasoningEffort:"high",timeoutMs:DEFAULT_SEMANTIC_TIMEOUT_MS},baseline:{path:DEFAULT_BASELINE_OUTPUT}},null,2)+"\n",[COMMON_IGNORE]:"# Shared ignore file for Code Approval Gates.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.quality/\n.semantic/\n\n*.log\n*.tmp\n",[QUALITY_IGNORE]:"# Quality Gate specific ignore file.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.quality/\n\nplaywright-report/\ntest-results/\nprojects/**/artifacts/\n\n*.log\n*.tmp\n",[SEMANTIC_IGNORE]:"# Semantic Gate specific ignore file.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.semantic/\n\npackage-lock.json\npnpm-lock.yaml\nyarn.lock\n*.min.js\ndocs/archive/**\n\n*.log\n*.tmp\n"};for(const[name,content]of Object.entries(files)){const filePath=path.join(cwd,name);if(!fs.existsSync(filePath)&&allowCreate){fs.writeFileSync(filePath,content,"utf8");created.push(name)}}fs.mkdirSync(path.join(cwd,".quality","reports"),{recursive:true});fs.mkdirSync(path.join(cwd,".quality","baseline"),{recursive:true});return created}
+function ensureDefaultProjectFiles(cwd,allowCreate=true){
+  const created=[];
+  const files={
+    [DEFAULT_CONFIG]:JSON.stringify({
+      threshold:DEFAULT_THRESHOLD,
+      defaultScope:"changed",
+      paths:[],
+      excludes:[],
+      includes:[],
+      ignoreFiles:[],
+      format:"json,md",
+      output:DEFAULT_OUTPUT,
+      quality:{enabled:true},
+      semantic:{
+        enabled:true,
+        provider:"codex-cli",
+        model:"gpt-5.5",
+        reasoningEffort:"high",
+        timeoutMs:DEFAULT_SEMANTIC_TIMEOUT_MS,
+        codexSandbox:"danger-full-access",
+        codexBypassSandbox:false,
+        codexSkipGitRepoCheck:true
+      },
+      baseline:{path:DEFAULT_BASELINE_OUTPUT}
+    },null,2)+"\n",
+    [COMMON_IGNORE]:"# Shared ignore file for Code Approval Gates.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.quality/\n.semantic/\n\n*.log\n*.tmp\n",
+    [QUALITY_IGNORE]:"# Quality Gate specific ignore file.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.quality/\n\nplaywright-report/\ntest-results/\nprojects/**/artifacts/\n\n*.log\n*.tmp\n",
+    [SEMANTIC_IGNORE]:"# Semantic Gate specific ignore file.\n# Syntax follows the same style as .gitignore.\n\n.git/\nnode_modules/\ncoverage/\ndist/\nbuild/\nout/\ntmp/\ntemp/\n\n.semantic/\n\npackage-lock.json\npnpm-lock.yaml\nyarn.lock\n*.min.js\ndocs/archive/**\n\n*.log\n*.tmp\n"
+  };
+  for(const[name,content]of Object.entries(files)){
+    const filePath=path.join(cwd,name);
+    if(!fs.existsSync(filePath)&&allowCreate){
+      fs.writeFileSync(filePath,content,"utf8");
+      created.push(name);
+    }
+  }
+  fs.mkdirSync(path.join(cwd,".quality","reports"),{recursive:true});
+  fs.mkdirSync(path.join(cwd,".quality","baseline"),{recursive:true});
+  return created;
+}
 async function handleDoctor(cwd,parsed){
   const options=parsed.options;
   const focus=parsed.positional[0]||"all";
@@ -255,6 +406,7 @@ async function handleDoctor(cwd,parsed){
   }
   if(["all","semantic"].includes(focus)){
     checks.push(...checkSemanticProviderConfig(semanticProvider,semanticModel,semanticApiKeyEnv));
+    if(semanticProvider==="codex-cli")checks.push(checkCodexApiNetwork());
     checks.push(checkFile(SEMANTIC_BIN,"semantic-wrapper"));
   }
   if(["all","gitlab"].includes(focus)){
@@ -282,6 +434,10 @@ async function handleDoctor(cwd,parsed){
     if(["all","quality"].includes(focus)&&isCheckOk(checkCommand("docker",["version","--format","{{.Server.Version}}"],"docker-daemon"))&&!isCheckOk(checkDockerImage("code-approval-gates/quality-sidecar:latest"))){
       checks.push(runFixCommand("quality-sidecar-image","docker",["build","-t","code-approval-gates/quality-sidecar:latest",path.join(ROOT,"quality-gate")],ROOT));
     }
+  }
+  if(options.fixNetwork){
+    if(["all","semantic"].includes(focus))checks.push(...fixCodexNetworkAccess(cwd,options));
+    else checks.push({name:"codex-api-firewall",status:"SKIPPED",message:"Network fix only applies to doctor semantic or doctor all."});
   }
   if(options.installGlobal){
     let runInstall=true;
@@ -313,6 +469,73 @@ function semanticProviderEnvVar(provider,explicitProviderEnv){
 }
 function semanticProviderNeedsModel(provider){
   return !["mock","ollama","codex-cli","claude-code","gemini-cli","opencode"].includes(provider);
+}
+function checkCodexApiNetwork(){
+  const script=[
+    'const tls=require("node:tls");',
+    'const host="api.openai.com";',
+    'let done=false;',
+    'const socket=tls.connect({host,port:443,servername:host,timeout:5000},()=>finish(0,"api.openai.com:443 reachable"));',
+    'function finish(code,message){if(done)return;done=true;if(code===0)console.log(message);else console.error(message);socket.destroy();process.exit(code);}',
+    'socket.on("error",error=>finish(2,error.message||String(error)));',
+    'socket.setTimeout(5000,()=>finish(2,"timeout connecting to api.openai.com:443"));'
+  ].join("");
+  const result=spawnSync(process.execPath,["-e",script],{encoding:"utf8",errors:"replace",timeout:7000,windowsHide:true});
+  if(result.status===0)return{name:"codex-api-network",status:"OK",message:trimLog(result.stdout||"api.openai.com:443 reachable")};
+  return{name:"codex-api-network",status:"WARNING",message:`Cannot confirm outbound TLS to api.openai.com:443 (${trimLog(result.stderr||result.stdout||result.error?.message||"network probe failed")}). If local Windows Firewall is the blocker, run code-approval-gates doctor semantic --fix-network --yes from an elevated PowerShell.`};
+}
+function fixCodexNetworkAccess(cwd,options){
+  if(process.platform!=="win32")return[{name:"codex-api-firewall",status:"SKIPPED",message:"Automatic firewall repair is implemented only for Windows. Ensure outbound TCP 443 to api.openai.com is allowed for the Codex runtime."}];
+  if(!isWindowsAdmin())return[{name:"codex-api-firewall-admin",status:"ERROR",message:`Administrator PowerShell is required to create firewall rules. Open PowerShell as Administrator and run: ${elevatedDoctorCommand(cwd,options)}`}];
+  const programs=resolveCodexNetworkPrograms();
+  if(!programs.length)return[{name:"codex-api-firewall",status:"ERROR",message:"No executable runtime was found for Codex/Node firewall rules."}];
+  const checks=programs.map(ensureCodexFirewallRule);
+  checks.push(checkCodexApiNetwork());
+  return checks;
+}
+function isWindowsAdmin(){
+  const result=spawnSync("net",["session"],{stdio:"ignore",windowsHide:true,timeout:5000});
+  return result.status===0;
+}
+function elevatedDoctorCommand(cwd,options){
+  const args=[process.execPath,__filename,"--cwd",cwd,"doctor","semantic","--fix-network","--yes"];
+  if(options.json)args.push("--json");
+  if(options.noInteractive||options.json||options.ci)args.push("--no-interactive");
+  return commandForDisplay(args[0],args.slice(1));
+}
+function resolveCodexNetworkPrograms(){
+  const programs=new Set();
+  addExecutable(programs,process.execPath);
+  const where=spawnSync("where.exe",["codex"],{encoding:"utf8",errors:"replace",timeout:5000,windowsHide:true});
+  for(const entry of String(where.stdout||"").split(/\r?\n/).map(item=>item.trim()).filter(Boolean)){
+    if(/\.exe$/i.test(entry))addExecutable(programs,entry);
+    if(/\.cmd$/i.test(entry))addExecutable(programs,path.join(path.dirname(entry),"node.exe"));
+  }
+  return [...programs];
+}
+function addExecutable(programs,filePath){
+  if(filePath&&/\.exe$/i.test(filePath)&&fs.existsSync(filePath))programs.add(path.resolve(filePath));
+}
+function ensureCodexFirewallRule(program){
+  const ruleName=`Code Approval Gates Codex API ${hashPath(program)} (${path.basename(program)})`;
+  const script=[
+    "$ErrorActionPreference='Stop'",
+    `$program=${psSingleQuote(program)}`,
+    `$name=${psSingleQuote(ruleName)}`,
+    "$existing=Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue",
+    "if($existing){Write-Output \"exists: $name\"; exit 0}",
+    "New-NetFirewallRule -DisplayName $name -Direction Outbound -Program $program -Action Allow -Profile Any -Protocol TCP -RemotePort 443 | Out-Null",
+    "Write-Output \"created: $name\""
+  ].join(";");
+  const result=spawnSync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-Command",script],{encoding:"utf8",errors:"replace",timeout:30000,windowsHide:true});
+  if(result.status===0)return{name:"codex-api-firewall",status:"FIXED",message:trimLog(`${trimLog(result.stdout)} for ${program}`)};
+  return{name:"codex-api-firewall",status:"ERROR",message:trimLog(result.stderr||result.stdout||result.error?.message||`Failed to create firewall rule for ${program}`),exitCode:result.status??1};
+}
+function psSingleQuote(value){
+  return `'${String(value).replace(/'/g,"''")}'`;
+}
+function hashPath(value){
+  return crypto.createHash("sha1").update(String(value).toLowerCase()).digest("hex").slice(0,8);
 }
 function semanticProviderCommand(provider){
   const commands={
@@ -541,6 +764,7 @@ function buildEquivalentCommand(command,options){
   if(base==="doctor"&&options.focus&&options.focus!=="all")args.push(String(options.focus));
   if(base==="doctor"){
     if(options.fix)args.push("--fix");
+    if(options.fixNetwork)args.push("--fix-network");
     if(options.yes)args.push("--yes");
     if(options.installGlobal)args.push("--install-global");
   }
@@ -564,6 +788,11 @@ function buildEquivalentCommand(command,options){
   if(options.provider)args.push("--provider",String(options.provider));
   if(options.model)args.push("--model",String(options.model));
   if(options.reasoningEffort)args.push("--reasoning-effort",String(options.reasoningEffort));
+  if(options.codexSandbox)args.push("--codex-sandbox",String(options.codexSandbox));
+  if(options.codexBypassSandbox===true)args.push("--codex-bypass-sandbox");
+  if(options.codexBypassSandbox===false)args.push("--no-codex-bypass-sandbox");
+  if(options.codexSkipGitRepoCheck===true)args.push("--codex-skip-git-repo-check");
+  if(options.codexSkipGitRepoCheck===false)args.push("--no-codex-skip-git-repo-check");
   if(options.ci)args.push("--ci");
   if(options.noInteractive||options.json||options.ci)args.push("--no-interactive");
   if(options.json)args.push("--json");
@@ -602,6 +831,34 @@ function toErrorObject(error){return{code:error.code||"ERROR",message:error.mess
 function exitCodeForError(error){if(error.code==="USAGE")return 2;return 4}
 function fail(options,exitCode,code,message,fix){const payload={schemaVersion:1,status:"ERROR",code,message,fix:fix||null,error:{code,message,fix:fix||null},exitCode};if(options.json)process.stdout.write(`${JSON.stringify(payload,null,2)}\n`);else process.stderr.write(`ERROR ${code}\n${message}\n${fix||""}\n`);return exitCode}
 function writeHumanOrJson(options,payload,text){if(options.json)process.stdout.write(`${JSON.stringify(payload,null,2)}\n`);else process.stdout.write(text)}
+const baseHelpFor=helpFor;
+helpFor=function(command){
+  if(/^doctor(\s+(quality|semantic|gitlab))?$/.test(String(command))){
+    return`code-approval-gates doctor
+
+Checks local/CI readiness and can create safe missing project files with --fix.
+
+Usage:
+  code-approval-gates doctor
+  code-approval-gates doctor --fix
+  code-approval-gates doctor --fix --yes
+  code-approval-gates doctor --install-global
+  code-approval-gates doctor quality --json --no-interactive
+  code-approval-gates doctor semantic --ci --no-interactive
+  code-approval-gates doctor semantic --fix-network --yes
+
+Focus values:
+  quality, semantic, gitlab
+
+Fix behavior:
+  --fix             Creates safe config/ignore/report files, installs semantic dependencies when missing, builds semantic dist when missing, and builds the quality sidecar image when Docker is available.
+  --fix-network     Windows admin repair for Codex/API outbound access: creates outbound TCP 443 firewall rules for the Codex/Node runtime and checks api.openai.com.
+  --yes             Pre-approve fix/install actions for scripts, CI, and other headless callers.
+  --install-global  Explicitly runs npm install -g for this package.
+`;
+  }
+  return baseHelpFor(command);
+};
 function helpPayloadFor(command,helpText=helpFor(command)){
   return{
     schemaVersion:1,

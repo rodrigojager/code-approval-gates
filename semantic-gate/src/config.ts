@@ -24,6 +24,9 @@ export const defaultConfig: SemanticGateConfig = {
   writeReports: true,
   timeoutMs: 300_000,
   temperature: 0,
+  codexSandbox: "danger-full-access",
+  codexBypassSandbox: false,
+  codexSkipGitRepoCheck: true,
   commandPromptMode: "stdin",
   commandOutput: "text",
 };
@@ -118,6 +121,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
   setIfPresent(config, "apiKeyEnv", env.SEMANTIC_GATE_API_KEY_ENV);
   setIfPresent(config, "apiKeyProvider", env.SEMANTIC_GATE_API_KEY_PROVIDER);
   setIfPresent(config, "reasoningEffort", env.SEMANTIC_GATE_REASONING_EFFORT);
+  setIfPresent(config, "codexSandbox", env.SEMANTIC_GATE_CODEX_SANDBOX);
+  setIfPresent(config, "codexBypassSandbox", env.SEMANTIC_GATE_CODEX_BYPASS_SANDBOX);
+  setIfPresent(config, "codexSkipGitRepoCheck", env.SEMANTIC_GATE_CODEX_SKIP_GIT_REPO_CHECK);
   setIfPresent(config, "command", env.SEMANTIC_GATE_COMMAND);
   setIfPresent(config, "commandArgs", env.SEMANTIC_GATE_COMMAND_ARGS);
   setIfPresent(config, "modelListCommand", env.SEMANTIC_GATE_MODEL_LIST_COMMAND);
@@ -204,6 +210,8 @@ function normalizeConfig(input: Record<string, unknown>, cliOptions: CliOptions 
   output.temperature = numberValue(input.temperature, defaultConfig.temperature, "temperature");
   output.includeUntracked = booleanValue(input.includeUntracked, defaultConfig.includeUntracked);
   output.writeReports = booleanValue(input.writeReports, defaultConfig.writeReports);
+  output.codexBypassSandbox = booleanValue(input.codexBypassSandbox, defaultConfig.codexBypassSandbox);
+  output.codexSkipGitRepoCheck = booleanValue(input.codexSkipGitRepoCheck, defaultConfig.codexSkipGitRepoCheck);
   output.paths = stringArrayValue(input.paths, defaultConfig.paths);
   output.excludes = stringArrayValue(input.excludes, defaultConfig.excludes);
   output.includes = stringArrayValue(input.includes, defaultConfig.includes);
@@ -250,6 +258,17 @@ function normalizeConfig(input: Record<string, unknown>, cliOptions: CliOptions 
   }
   if (!["text", "json"].includes(output.commandOutput)) {
     throw new SemanticGateError("commandOutput must be text or json.", "usage");
+  }
+  if (input.codexSandbox === null || input.codexSandbox === false || input.codexSandbox === "") {
+    output.codexSandbox = undefined;
+  } else if (input.codexSandbox !== undefined) {
+    output.codexSandbox = String(input.codexSandbox) as SemanticGateConfig["codexSandbox"];
+  }
+  if (
+    output.codexSandbox &&
+    !["read-only", "workspace-write", "danger-full-access"].includes(output.codexSandbox)
+  ) {
+    throw new SemanticGateError("codexSandbox must be read-only, workspace-write, or danger-full-access.", "usage");
   }
   return output;
 }

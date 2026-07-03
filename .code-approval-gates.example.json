@@ -15,7 +15,10 @@
     "provider": "codex-cli",
     "model": "gpt-5.5",
     "reasoningEffort": "high",
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "codexSandbox": "danger-full-access",
+    "codexBypassSandbox": false,
+    "codexSkipGitRepoCheck": true
   },
   "baseline": {
     "path": ".quality/baseline/baseline.json"

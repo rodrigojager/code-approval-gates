@@ -102,6 +102,14 @@ With explicit user authorization for safe setup fixes:
 code-approval-gates doctor semantic --fix --yes --no-interactive
 ```
 
+If Codex CLI works normally but the gate reports provider network errors, check and repair local Windows firewall rules with explicit user authorization:
+
+```powershell
+code-approval-gates doctor semantic --fix-network --yes --no-interactive
+```
+
+This may require Administrator PowerShell. It only applies to local Windows firewall access for the Codex/Node runtime; it cannot override a parent sandbox, VPN, corporate proxy, or external firewall.
+
 If the unified command is missing but this repository is available, install from the repository root:
 
 ```powershell
