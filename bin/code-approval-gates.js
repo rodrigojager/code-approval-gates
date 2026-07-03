@@ -867,6 +867,12 @@ function fail(options,exitCode,code,message,fix){const payload={schemaVersion:1,
 function writeHumanOrJson(options,payload,text){if(options.json)process.stdout.write(`${JSON.stringify(payload,null,2)}\n`);else process.stdout.write(text)}
 const baseHelpFor=helpFor;
 helpFor=function(command){
+  if(String(command)==="semantic"){
+    return baseHelpFor(command).replace(
+      "  --reasoning-effort <level>\n",
+      "  --reasoning-effort <level>\n  --codex-sandbox read-only|workspace-write|danger-full-access\n  --codex-bypass-sandbox\n  --codex-skip-git-repo-check / --no-codex-skip-git-repo-check\n",
+    );
+  }
   if(/^doctor(\s+(quality|semantic|gitlab))?$/.test(String(command))){
     return`code-approval-gates doctor
 

@@ -549,6 +549,9 @@ test("help text lists all public commands and baseline scope flags", () => {
   const semanticHelp = helpFor("semantic");
 
   assert.match(semanticHelp, /--objective <text>/);
+  assert.match(semanticHelp, /--codex-sandbox read-only\|workspace-write\|danger-full-access/);
+  assert.match(semanticHelp, /--codex-bypass-sandbox/);
+  assert.match(semanticHelp, /--no-codex-skip-git-repo-check/);
   assert.match(semanticHelp, /code-approval-gates semantic --ci --scope changed[^\n]*--no-interactive/);
 
   const runHelp = helpFor("run");
