@@ -45,7 +45,10 @@ export async function collectGitReviewContext(
   const warnings: string[] = [];
   const ignorePlan = loadIgnorePlan(repoRoot, config);
 
-  const status = await git(repoRoot, ["status", "--short"], "identify changed files");
+  const statusArgs = config.paths.length > 0
+    ? ["status", "--short", "--", ...config.paths.map(normalizePath)]
+    : ["status", "--short"];
+  const status = await git(repoRoot, statusArgs, "identify changed files");
   commands.push(record(status));
 
   let diffStat = "";

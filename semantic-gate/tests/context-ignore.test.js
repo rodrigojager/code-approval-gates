@@ -70,3 +70,31 @@ test("semantic config ignores configured paths outside paths scope", () => {
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("paths scope filters git status to selected paths", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-path-status-"));
+  try {
+    run("git", ["init"], temp);
+    run("git", ["config", "user.email", "test@example.invalid"], temp);
+    run("git", ["config", "user.name", "Test User"], temp);
+    fs.writeFileSync(path.join(temp, "selected.js"), "const selected = 1;\n", "utf8");
+    fs.writeFileSync(path.join(temp, "other.js"), "const other = 1;\n", "utf8");
+    run("git", ["add", "selected.js", "other.js"], temp);
+    run("git", ["commit", "-m", "initial"], temp);
+    fs.appendFileSync(path.join(temp, "selected.js"), "const changed = true;\n", "utf8");
+    fs.appendFileSync(path.join(temp, "other.js"), "const leaked = true;\n", "utf8");
+
+    const config = loadEffectiveConfig(temp, {
+      scope: "paths",
+      paths: ["selected.js"],
+      includeUntracked: true
+    });
+    const context = await collectGitReviewContext(temp, config);
+
+    assert.match(context.statusShort, /selected\.js/);
+    assert.doesNotMatch(context.statusShort, /other\.js/);
+    assert.deepEqual(context.changedFiles.map((file) => file.path), ["selected.js"]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

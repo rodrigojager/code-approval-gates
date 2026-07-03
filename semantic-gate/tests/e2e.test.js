@@ -221,6 +221,145 @@ test("semantic-gate run passes model and reasoning effort to codex-cli provider"
   }
 });
 
+test("semantic-gate classifies codex-cli provider network failures", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-gate-codex-network-"));
+  const repo = path.join(temp, "repo");
+  const home = path.join(temp, "home");
+  const binDir = path.join(temp, "bin");
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1\n", "utf8");
+  fs.writeFileSync(path.join(temp, "objective.md"), "Review the small app change.", "utf8");
+
+  const fakeCodexJs = path.join(binDir, "fake-codex-network.js");
+  fs.writeFileSync(
+    fakeCodexJs,
+    [
+      "console.error('+      throw new SemanticGateError(\"Provider HTTP error 500.\", \"provider\", json);');",
+      "console.error('2026-07-03T04:48:35Z ERROR failed to connect to websocket: os error 10013, url: wss://api.openai.com/v1/responses');",
+      "console.error('ERROR: stream disconnected before completion: error sending request for url (https://api.openai.com/v1/responses)');",
+      "process.exit(1);",
+    ].join("\n"),
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, "codex.cmd"), `@echo off\r\nnode "%dp0%\\fake-codex-network.js" %*\r\n`, "utf8");
+  } else {
+    const codexPath = path.join(binDir, "codex");
+    fs.writeFileSync(codexPath, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeCodexJs)});\n`, "utf8");
+    fs.chmodSync(codexPath, 0o755);
+  }
+
+  run("git", ["init"], repo);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "run",
+      "--cwd",
+      repo,
+      "--objective-file",
+      path.join(temp, "objective.md"),
+      "--provider",
+      "codex-cli",
+      "--model",
+      "gpt-5.5",
+      "--json",
+    ],
+    {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        Path: `${binDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ""}`,
+        SEMANTIC_GATE_HOME: home,
+      },
+    },
+  );
+
+  try {
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /provider network connection failed/);
+    assert.match(result.stderr, /"classification": "provider-network"/);
+    assert.match(result.stderr, /api\.openai\.com\/v1\/responses/);
+    assert.doesNotMatch(result.stderr, /SemanticGateError/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("semantic-gate does not classify prompt context as provider network failure", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "semantic-gate-codex-timeout-"));
+  const repo = path.join(temp, "repo");
+  const home = path.join(temp, "home");
+  const binDir = path.join(temp, "bin");
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = 1\n", "utf8");
+  fs.writeFileSync(path.join(temp, "objective.md"), "Review the small app change.", "utf8");
+
+  const fakeCodexJs = path.join(binDir, "fake-codex-timeout.js");
+  fs.writeFileSync(
+    fakeCodexJs,
+    [
+      "console.error('+      \"console.error(\\'ERROR failed to connect to wss://api.openai.com/v1/responses\\');\",');",
+      "console.error('269:    /api\\\\.openai\\\\.com|\\\\/v1\\\\/responses|websocket/.test(text)');",
+      "console.error('\\u001b[7msemantic-gate\\\\src\\\\providers.ts:331:\\u001b[0m return /failed to connect|wss:\\\\/\\\\//i.test(line);');",
+      "process.exit(124);",
+    ].join("\n"),
+    "utf8",
+  );
+
+  if (process.platform === "win32") {
+    fs.writeFileSync(path.join(binDir, "codex.cmd"), `@echo off\r\nnode "%dp0%\\fake-codex-timeout.js" %*\r\n`, "utf8");
+  } else {
+    const codexPath = path.join(binDir, "codex");
+    fs.writeFileSync(codexPath, `#!/usr/bin/env node\nrequire(${JSON.stringify(fakeCodexJs)});\n`, "utf8");
+    fs.chmodSync(codexPath, 0o755);
+  }
+
+  run("git", ["init"], repo);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "run",
+      "--cwd",
+      repo,
+      "--objective-file",
+      path.join(temp, "objective.md"),
+      "--provider",
+      "codex-cli",
+      "--model",
+      "gpt-5.5",
+      "--json",
+    ],
+    {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        Path: `${binDir}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ""}`,
+        SEMANTIC_GATE_HOME: home,
+      },
+    },
+  );
+
+  try {
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /provider timed out/);
+    assert.match(result.stderr, /"classification": "provider-timeout"/);
+    assert.doesNotMatch(result.stderr, /"classification": "provider-network"/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, `${command} ${args.join(" ")}\n${result.stderr}`);

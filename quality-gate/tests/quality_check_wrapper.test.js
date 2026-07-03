@@ -10,8 +10,10 @@ const {
   DEFAULT_IMAGE,
   parseArgs,
   buildDockerArgs,
+  buildLocalSidecarArgs,
   commandLine,
   isDockerAvailable,
+  ensureDockerAvailable,
   canBuildBundledImage,
   resolveScopeFiles,
   helpText
@@ -136,6 +138,8 @@ test("resolveScopeFiles paths scope does not add support files outside selected 
 test("help text documents ignore re-inclusion", () => {
   assert.match(helpText(), /supports !path re-inclusion/);
   assert.match(helpText(), /Add a path for scope=paths/);
+  assert.match(helpText(), /Local fallback:/);
+  assert.match(helpText(), /bundled Python sidecar runs locally in offline mode/);
   assert.doesNotMatch(helpText(), /Limit changed\/full context/);
 });
 
@@ -151,6 +155,10 @@ test("parseArgs supports explicit build controls", () => {
   assert.equal(parseArgs(["--no-build"], {}).build, false);
   assert.equal(parseArgs(["--build"], { QUALITY_CHECK_NO_BUILD: "1" }).build, true);
   assert.equal(parseArgs([], { QUALITY_CHECK_AUTO_BUILD: "0" }).build, false);
+  assert.equal(parseArgs(["--no-start-docker"], {}).startDocker, false);
+  assert.equal(parseArgs(["--start-docker"], { QUALITY_CHECK_NO_START_DOCKER: "1" }).startDocker, true);
+  assert.equal(parseArgs(["--docker-start-timeout-ms", "5000"], {}).dockerStartTimeoutMs, 5000);
+  assert.throws(() => parseArgs(["--docker-start-timeout-ms", "nope"], {}), /non-negative number/);
 });
 
 test("parseArgs rejects missing wrapper values except docker-arg dash values", () => {
@@ -172,6 +180,28 @@ test("buildDockerArgs creates the expected sidecar invocation", () => {
   assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
 });
 
+test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () => {
+  const targetPath = path.resolve("sample-project");
+  const reportsPath = path.join(targetPath, ".quality", "reports");
+  const parsed = parseArgs(["sample-project", "--threshold", "90"], {});
+  const args = buildLocalSidecarArgs(parsed, targetPath, reportsPath);
+
+  assert.deepEqual(args.slice(0, 4), ["-m", "quality_sidecar", "check", targetPath]);
+  assert.ok(args.includes("--output"));
+  assert.ok(args.includes(reportsPath));
+  assert.ok(args.includes("--mode"));
+  assert.ok(args.includes("offline"));
+  assert.deepEqual(args.slice(-4), ["--threshold", "90", "--mode", "offline"]);
+
+  const explicitMode = buildLocalSidecarArgs(
+    parseArgs(["sample-project", "--mode", "quick"], {}),
+    targetPath,
+    reportsPath
+  );
+  assert.equal(explicitMode.filter((arg) => arg === "--mode").length, 1);
+  assert.ok(explicitMode.includes("quick"));
+});
+
 test("commandLine quotes paths with spaces for debug output", () => {
   const line = commandLine("docker", ["run", "-v", "C:\\Project Files:/workspace"]);
   assert.match(line, /^docker run -v "/);
@@ -187,6 +217,29 @@ test("isDockerAvailable validates server output", () => {
     isDockerAvailable({}, () => ({ status: 0, stdout: "", stderr: "Internal Server Error" })),
     false
   );
+});
+
+test("ensureDockerAvailable starts Docker and waits for readiness", () => {
+  const parsed = parseArgs(["--docker-start-timeout-ms", "1"], {});
+  let versionChecks = 0;
+  const starts = [];
+  const runner = (command, args) => {
+    if (command === "docker" && args[0] === "version") {
+      versionChecks += 1;
+      return versionChecks >= 2
+        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
+        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+    }
+    return { status: 3 };
+  };
+  const starter = (command, args) => {
+    starts.push([command, args]);
+    return { status: 0 };
+  };
+
+  assert.equal(ensureDockerAvailable(parsed, {}, runner, starter), true);
+  assert.equal(starts.length, 1);
+  assert.equal(versionChecks >= 2, true);
 });
 
 test("runDockerWrapper propagates docker run exit code", () => {
@@ -258,6 +311,77 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
   const exitCode = runDockerWrapper([target, "--scope", "full", "--image", "example/sidecar:test"], process.env, runner);
   assert.equal(exitCode, 0);
   assert.ok(calls.some(([, args]) => args[0] === "build" && args.includes("example/sidecar:test")));
+  assert.ok(calls.some(([, args]) => args[0] === "run"));
+});
+
+test("runDockerWrapper falls back to local sidecar when Docker is unavailable", () => {
+  const {
+    runDockerWrapper
+  } = require("../bin/quality-check.js");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-local-"));
+  const target = path.join(temp, "target");
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const calls = [];
+  const runner = (command, args) => {
+    calls.push([command, args]);
+    if (command === "docker" && args[0] === "version") {
+      return { status: 1, stdout: "", stderr: "Docker unavailable" };
+    }
+    if (args[0] === "-m" && args[1] === "quality_sidecar") {
+      return { status: 0 };
+    }
+    return { status: 3 };
+  };
+
+  const exitCode = runDockerWrapper([target, "--scope", "full", "--threshold", "90", "--no-start-docker"], process.env, runner);
+  assert.equal(exitCode, 0);
+  assert.ok(calls.some(([command]) => command === "docker"));
+  const localCall = calls.find(([, args]) => args[0] === "-m" && args[1] === "quality_sidecar");
+  assert.ok(localCall);
+  assert.ok(localCall[1].includes("--mode"));
+  assert.ok(localCall[1].includes("offline"));
+});
+
+test("runDockerWrapper starts Docker automatically before running the container", () => {
+  const {
+    runDockerWrapper
+  } = require("../bin/quality-check.js");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-start-docker-"));
+  const target = path.join(temp, "target");
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  let versionChecks = 0;
+  const starts = [];
+  const calls = [];
+  const runner = (command, args) => {
+    calls.push([command, args]);
+    if (command === "docker" && args[0] === "version") {
+      versionChecks += 1;
+      return versionChecks >= 2
+        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
+        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+    }
+    if (args[0] === "image") {
+      return { status: 0 };
+    }
+    if (args[0] === "run") {
+      return { status: 0 };
+    }
+    return { status: 3 };
+  };
+  const starter = (command, args) => {
+    starts.push([command, args]);
+    return { status: 0 };
+  };
+
+  const exitCode = runDockerWrapper([target, "--scope", "full", "--docker-start-timeout-ms", "1"], {}, runner, starter);
+  assert.equal(exitCode, 0);
+  assert.equal(starts.length, 1);
   assert.ok(calls.some(([, args]) => args[0] === "run"));
 });
 

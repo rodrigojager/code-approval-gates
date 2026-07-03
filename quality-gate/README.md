@@ -34,6 +34,8 @@ quality-check . --scope full --threshold 90 --format=json,md --output .quality/r
 quality-check . --scope paths --path docs --threshold 90 --format=json,md --output .quality/reports/docs
 ```
 
+Docker is the preferred runtime for full scans. When Docker is not installed, running, or accessible, `quality-check` tries to start Docker automatically and waits for the daemon to become ready. If Docker does not come up within the timeout, it runs the bundled Python sidecar locally in `offline` mode. Pass `--no-start-docker` to skip startup, `--docker-start-timeout-ms <ms>` to tune the wait, and `--mode quick`, `--mode offline`, or `--mode full` to choose the sidecar mode explicitly.
+
 `--path` requires `--scope paths`. For `changed` and `full`, use `--exclude`, `--include`, or ignore files to filter.
 
 Reports include `scoreAppliesTo`:

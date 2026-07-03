@@ -22,7 +22,7 @@ export const defaultConfig: SemanticGateConfig = {
   contextStrategy: "auto",
   outputDir: ".quality/semantic-gate",
   writeReports: true,
-  timeoutMs: 120_000,
+  timeoutMs: 300_000,
   temperature: 0,
   commandPromptMode: "stdin",
   commandOutput: "text",

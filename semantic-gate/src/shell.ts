@@ -38,11 +38,20 @@ export function runCommand(
     let settled = false;
     const timeout = options.timeoutMs
       ? setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            child.kill("SIGTERM");
-            resolve({ code: 124, stdout, stderr: `${stderr}\nCommand timed out.`.trim() });
-          }
+        if (!settled) {
+          settled = true;
+          child.kill("SIGTERM");
+          child.stdin.destroy();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          setTimeout(() => {
+            if (child.exitCode === null) {
+              child.kill("SIGKILL");
+            }
+          }, 1000).unref();
+          child.unref();
+          resolve({ code: 124, stdout, stderr: `${stderr}\nCommand timed out.`.trim() });
+        }
         }, options.timeoutMs)
       : undefined;
 

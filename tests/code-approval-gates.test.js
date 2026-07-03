@@ -62,7 +62,10 @@ test("parseArgs supports unified scope, paths, ignores, and headless flags", () 
     "--json",
     "--no-interactive",
     "--no-semantic",
-    "--no-quality"
+    "--no-quality",
+    "--no-start-docker",
+    "--docker-start-timeout-ms",
+    "5000"
   ]);
 
   assert.equal(parsed.command, "run");
@@ -78,9 +81,12 @@ test("parseArgs supports unified scope, paths, ignores, and headless flags", () 
   assert.equal(parsed.options.noInteractive, true);
   assert.equal(parsed.options.semantic, false);
   assert.equal(parsed.options.quality, false);
+  assert.equal(parsed.options.noStartDocker, true);
+  assert.equal(parsed.options.dockerStartTimeoutMs, 5000);
   assert.equal(parsed.options.passthrough.includes("--refresh"), false);
   assert.equal(parsed.options.passthrough.includes("--json"), false);
   assert.equal(parsed.options.passthrough.includes("--no-interactive"), false);
+  assert.equal(parsed.options.passthrough.includes("--no-start-docker"), false);
 
   const globalFirst = parseArgs(["--cwd", "repo", "run", "--scope", "full", "--json"]);
   assert.equal(globalFirst.command, "run");
@@ -1013,7 +1019,10 @@ test("run changed scope with no matching files returns approved summary with emp
     assert.equal(summary.scopeResolution.ignoredCount >= 0, true);
     assert.equal(summary.message, "No files matched the requested scope after ignore rules.");
     assert.equal(Array.isArray(summary.gates), true);
-    assert.equal(summary.gates.length, 0);
+    assert.equal(summary.gates.length, 2);
+    assert.deepEqual(summary.gates.map((gate) => gate.name), ["semantic", "quality"]);
+    assert.deepEqual(summary.gates.map((gate) => gate.score), [100, 100]);
+    assert.deepEqual(summary.gates.map((gate) => gate.skipped), [true, true]);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

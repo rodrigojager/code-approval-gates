@@ -243,10 +243,113 @@ async function commandProvider(request: ProviderRequest): Promise<ProviderRespon
   }
   const result = await runCommand(command, finalArgs, runOptions);
   if (result.code !== 0) {
-    throw new SemanticGateError(`Command provider exited with ${result.code}.`, "provider", result.stderr);
+    const failure = classifyCommandProviderFailure(request.config.provider, result.code ?? 1, result.stderr || result.stdout);
+    throw new SemanticGateError(failure.message, "provider", failure.details);
   }
   const text = request.config.commandOutput === "json" ? result.stdout : result.stdout.trim();
   return { text, raw: { stdout: result.stdout, stderr: result.stderr, code: result.code } };
+}
+
+function classifyCommandProviderFailure(
+  provider: string | undefined,
+  exitCode: number,
+  output: string,
+): { message: string; details: Record<string, unknown> } {
+  const text = String(output || "");
+  const runtimeLines = providerRuntimeLines(text);
+  const details = {
+    provider: provider ?? "command",
+    exitCode,
+    classification: "command-failed",
+    advice: "Inspect the provider command configuration and rerun semantic-gate status.",
+    diagnosticExcerpt: providerDiagnosticExcerpt(text),
+  };
+
+  if (runtimeLines.some(isProviderNetworkLine)) {
+    return {
+      message: `Command provider exited with ${exitCode}: provider network connection failed before a semantic response was returned.`,
+      details: {
+        ...details,
+        classification: "provider-network",
+        advice: "Verify network/firewall/sandbox access to the provider API. This is different from an API credential failure.",
+      },
+    };
+  }
+
+  if (exitCode === 124 || runtimeLines.some(isProviderTimeoutLine)) {
+    return {
+      message: `Command provider exited with ${exitCode}: provider timed out before a semantic response was returned.`,
+      details: {
+        ...details,
+        classification: "provider-timeout",
+        advice: "Increase --timeout-ms or reduce the semantic context size. This is different from an API credential failure.",
+      },
+    };
+  }
+
+  if (runtimeLines.some(isProviderAuthLine)) {
+    return {
+      message: `Command provider exited with ${exitCode}: provider authentication failed.`,
+      details: {
+        ...details,
+        classification: "provider-auth",
+        advice: "Check the provider login/API key, configured model, and semantic-gate status.",
+      },
+    };
+  }
+
+  return {
+    message: `Command provider exited with ${exitCode}.`,
+    details,
+  };
+}
+
+function providerDiagnosticExcerpt(output: string): string {
+  const runtimeLines = providerRuntimeLines(output);
+  const transportLines = runtimeLines.filter(isProviderNetworkLine);
+  const timeoutLines = runtimeLines.filter(isProviderTimeoutLine);
+  const operationalLines = transportLines.length ? [...transportLines, ...timeoutLines] : timeoutLines;
+  const diagnosticLines = operationalLines.length
+    ? operationalLines
+    : runtimeLines.filter((line) =>
+        /error|warning|failed|connect|socket|timeout|permission|denied|unauthorized|forbidden|api\.openai\.com|\/v1\/responses/i.test(line),
+      );
+  const selected = diagnosticLines.length ? diagnosticLines : runtimeLines.slice(-12);
+  const excerpt = selected.slice(-20).join("\n");
+  return excerpt.length > 2000 ? `${excerpt.slice(0, 900)}\n...<truncated>...\n${excerpt.slice(-900)}` : excerpt;
+}
+
+function providerRuntimeLines(output: string): string[] {
+  return stripAnsi(String(output || ""))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !looksLikePromptContextLine(line));
+}
+
+function isProviderNetworkLine(line: string): boolean {
+  return /codex_api|responses_websocket|failed to connect|stream disconnected|falling back from websockets|reconnecting|error sending request|os error \d+|wss:\/\/|econnrefused|enotfound|etimedout|permission denied|acesso negado/i.test(line);
+}
+
+function isProviderAuthLine(line: string): boolean {
+  return /401|403|unauthorized|forbidden|invalid api key|authentication failed|api key rejected/i.test(line);
+}
+
+function isProviderTimeoutLine(line: string): boolean {
+  return /^command timed out(\.| after \d+ms\.)?$/i.test(line);
+}
+
+function looksLikePromptContextLine(line: string): boolean {
+  return (
+    /^diff --git\b|^@@\b|^index [0-9a-f]+\.\.[0-9a-f]+/i.test(line) ||
+    /^[+-]/.test(line) ||
+    /^\d+:\s/.test(line) ||
+    /^rg:\s/i.test(line) ||
+    /(^|\s)[\w./\\-]+\.(ts|tsx|js|jsx|mjs|cjs|py|md|json):\d+:/i.test(line) ||
+    (/\|/.test(line) && /api\.openai\.com|responses_websocket|econnrefused|enotfound|etimedout|permission|wss:\\?\/\\?\//i.test(line)) ||
+    /^[A-Za-z_$][\w$]*:\s+.*https?:\/\//.test(line) ||
+    /SemanticGateError|providerDiagnosticExcerpt|runGateProcess|spawnSync|spawn\(/.test(line)
+  );
 }
 
 function defaultCommandConfigForProvider(

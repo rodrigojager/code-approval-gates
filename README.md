@@ -140,6 +140,8 @@ code-approval-gates quality --scope changed
 code-approval-gates run --gate quality --scope changed
 ```
 
+Quando Docker nao esta instalado, iniciado ou acessivel, o Quality Gate tenta iniciar o Docker automaticamente e espera o daemon ficar pronto. Se o Docker nao subir dentro do limite, ele usa o sidecar Python empacotado em modo `offline`. Use `--no-start-docker` para pular a tentativa de inicializacao, `--docker-start-timeout-ms <ms>` para ajustar a espera, e `--mode quick`, `--mode offline` ou `--mode full` para escolher o modo do sidecar; `full` continua dependendo das ferramentas externas disponiveis no ambiente.
+
 Rodar somente o Semantic Gate:
 
 ```powershell
@@ -533,6 +535,8 @@ Run only Quality Gate:
 code-approval-gates quality --scope changed
 code-approval-gates run --gate quality --scope changed
 ```
+
+When Docker is not installed, running, or accessible, the Quality Gate tries to start Docker automatically and waits for the daemon to become ready. If Docker does not come up within the timeout, it uses the bundled Python sidecar in `offline` mode. Use `--no-start-docker` to skip startup, `--docker-start-timeout-ms <ms>` to tune the wait, and `--mode quick`, `--mode offline`, or `--mode full` to choose the sidecar mode; `full` still depends on external tools available in the environment.
 
 Run only Semantic Gate:
 

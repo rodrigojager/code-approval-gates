@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -58,6 +58,8 @@ function parseArgs(rawArgs, env = process.env) {
     image: env.QUALITY_SIDECAR_IMAGE || DEFAULT_IMAGE,
     pull: false,
     noPull: false,
+    startDocker: env.QUALITY_CHECK_START_DOCKER !== "0" && env.QUALITY_CHECK_NO_START_DOCKER !== "1",
+    dockerStartTimeoutMs: Number(env.QUALITY_CHECK_DOCKER_START_TIMEOUT_MS || 120000),
     build: env.QUALITY_CHECK_AUTO_BUILD !== "0" && env.QUALITY_CHECK_NO_BUILD !== "1",
     debugDocker: false,
     help: false,
@@ -178,6 +180,27 @@ function parseArgs(rawArgs, env = process.env) {
       continue;
     }
 
+    if (arg === "--start-docker") {
+      parsed.startDocker = true;
+      continue;
+    }
+
+    if (arg === "--no-start-docker") {
+      parsed.startDocker = false;
+      continue;
+    }
+
+    if (arg === "--docker-start-timeout-ms") {
+      parsed.dockerStartTimeoutMs = Number(takeValue(raw, i, arg));
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--docker-start-timeout-ms=")) {
+      parsed.dockerStartTimeoutMs = Number(arg.slice("--docker-start-timeout-ms=".length));
+      continue;
+    }
+
     if (arg === "--build" || arg === "-Build" || arg === "-build") {
       parsed.build = true;
       continue;
@@ -241,6 +264,9 @@ function parseArgs(rawArgs, env = process.env) {
   if (parsed.scope === "paths" && parsed.paths.length === 0) {
     throw new Error("--scope paths requires at least one --path");
   }
+  if (!Number.isFinite(parsed.dockerStartTimeoutMs) || parsed.dockerStartTimeoutMs < 0) {
+    throw new Error("--docker-start-timeout-ms must be a non-negative number");
+  }
   if (parsed.json && !hasContainerFormat(parsed.containerArgs)) {
     parsed.containerArgs.push("--format", "json");
   }
@@ -283,6 +309,27 @@ function buildDockerArgs(parsed, targetPath, reportsPath = path.join(targetPath,
     ".quality/reports",
     ...containerArgs
   ];
+}
+
+function hasSidecarMode(args) {
+  return args.some((arg) => arg === "--mode" || String(arg).startsWith("--mode="));
+}
+
+function buildLocalSidecarArgs(parsed, targetPath, reportsPath) {
+  const containerArgs = withoutOutputArgs(parsed.containerArgs);
+  const args = [
+    "-m",
+    "quality_sidecar",
+    "check",
+    targetPath,
+    "--output",
+    reportsPath,
+    ...containerArgs
+  ];
+  if (!hasSidecarMode(containerArgs)) {
+    args.push("--mode", "offline");
+  }
+  return args;
 }
 
 function withoutOutputArgs(args) {
@@ -575,6 +622,109 @@ function isDockerAvailable(env = process.env, runner = spawnSync) {
   return !result.error && result.status === 0 && stdout.length > 0 && !/internal server error/i.test(stderr);
 }
 
+function sleepSync(ms) {
+  if (ms <= 0) {
+    return;
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function dockerDesktopCandidates(env = process.env) {
+  const candidates = [];
+  if (env.DOCKER_DESKTOP_PATH) {
+    candidates.push({ command: env.DOCKER_DESKTOP_PATH, args: [] });
+  }
+  if (process.platform === "win32") {
+    const programFiles = env.ProgramFiles || "C:\\Program Files";
+    const localAppData = env.LOCALAPPDATA;
+    const windowsCandidates = [
+      path.join(programFiles, "Docker", "Docker", "Docker Desktop.exe"),
+      localAppData ? path.join(localAppData, "Docker", "Docker Desktop.exe") : null
+    ].filter(Boolean);
+    for (const command of windowsCandidates) {
+      if (fs.existsSync(command)) {
+        candidates.push({ command, args: [] });
+      }
+    }
+  } else if (process.platform === "darwin") {
+    candidates.push({ command: "open", args: ["-a", "Docker"] });
+  }
+  candidates.push({ command: "docker", args: ["desktop", "start"] });
+  return candidates;
+}
+
+function startDetachedProcess(command, args, env = process.env) {
+  try {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env
+    });
+    child.unref();
+    return { status: 0 };
+  } catch (error) {
+    return { error };
+  }
+}
+
+function startDockerDaemon(env = process.env, starter = startDetachedProcess) {
+  const failures = [];
+  for (const candidate of dockerDesktopCandidates(env)) {
+    const result = starter(candidate.command, candidate.args, env);
+    if (!result.error && (result.status === undefined || result.status === 0)) {
+      return {
+        started: true,
+        command: commandLine(candidate.command, candidate.args),
+        failures
+      };
+    }
+    failures.push({
+      command: commandLine(candidate.command, candidate.args),
+      message: result.error ? result.error.message : `exit ${result.status}`
+    });
+  }
+  return { started: false, command: null, failures };
+}
+
+function waitForDocker(env = process.env, runner = spawnSync, timeoutMs = 120000, pollMs = 2000) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  do {
+    if (isDockerAvailable(env, runner)) {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      break;
+    }
+    sleepSync(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return isDockerAvailable(env, runner);
+}
+
+function ensureDockerAvailable(parsed, env = process.env, runner = spawnSync, starter = startDetachedProcess) {
+  if (isDockerAvailable(env, runner)) {
+    return true;
+  }
+  if (!parsed.startDocker) {
+    return false;
+  }
+  const started = startDockerDaemon(env, starter);
+  if (!started.started) {
+    console.error("Docker is not available and could not be started automatically.");
+    for (const failure of started.failures) {
+      console.error(`- ${failure.command}: ${failure.message}`);
+    }
+    return false;
+  }
+  console.error(`Docker is not available; started ${started.command} and waiting for the daemon...`);
+  if (waitForDocker(env, runner, parsed.dockerStartTimeoutMs)) {
+    console.error("Docker daemon is ready.");
+    return true;
+  }
+  console.error(`Docker did not become ready within ${parsed.dockerStartTimeoutMs}ms.`);
+  return false;
+}
+
 function imageExists(image, env = process.env, runner = spawnSync) {
   const result = runner("docker", ["image", "inspect", image], {
     encoding: "utf8",
@@ -612,6 +762,39 @@ function buildBundledImage(image, env = process.env, runner = spawnSync, package
   return result.status ?? 3;
 }
 
+function pythonCommand(env = process.env) {
+  if (env.PYTHON) {
+    return env.PYTHON;
+  }
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+function localSidecarEnv(env = process.env, packageRoot = PACKAGE_ROOT) {
+  const sidecarPath = path.join(packageRoot, "sidecar");
+  return {
+    ...env,
+    PYTHONPATH: env.PYTHONPATH ? `${sidecarPath}${path.delimiter}${env.PYTHONPATH}` : sidecarPath
+  };
+}
+
+function runLocalSidecar(parsed, scopedTarget, reportsPath, env = process.env, runner = spawnSync) {
+  const args = buildLocalSidecarArgs(parsed, scopedTarget.effectiveTarget, reportsPath);
+  const command = pythonCommand(env);
+  if (parsed.debugDocker) {
+    console.log(commandLine(command, args));
+  }
+  console.error("Docker is not available; running bundled Quality Gate sidecar locally in offline mode.");
+  const result = runner(command, args, {
+    stdio: "inherit",
+    env: localSidecarEnv(env)
+  });
+  if (result.error) {
+    console.error(`Failed to run local quality sidecar: ${result.error.message}`);
+    return 3;
+  }
+  return result.status ?? 3;
+}
+
 function helpText() {
   return `quality-check
 
@@ -637,9 +820,15 @@ Automation:
 Docker wrapper flags:
   --image <image>
   --pull / --no-pull
+  --start-docker / --no-start-docker
+  --docker-start-timeout-ms <ms>
   --build / --no-build
   --docker-arg <arg>
   --debug-docker
+
+Local fallback:
+  When Docker is not available, the bundled Python sidecar runs locally in offline mode.
+  Pass --mode quick|offline|full to choose the sidecar mode explicitly.
 
 All remaining flags are passed to the sidecar check command.
 `;
@@ -707,7 +896,7 @@ function augmentQualityReports(reportsPath, scope, parsed) {
   }
 }
 
-function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync) {
+function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starter = startDetachedProcess) {
   let parsed;
   let targetPath;
 
@@ -738,11 +927,10 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync) {
     return 0;
   }
 
-  if (!isDockerAvailable(env, runner)) {
-    console.error(
-      "Docker nao esta instalado, iniciado ou acessivel. O comando quality-check precisa do Docker para executar a analise completa."
-    );
-    return 3;
+  if (!ensureDockerAvailable(parsed, env, runner, starter)) {
+    const exitCode = runLocalSidecar(parsed, scopedTarget, reportsPath, env, runner);
+    augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
+    return exitCode;
   }
 
   if (parsed.pull) {
@@ -791,9 +979,15 @@ module.exports = {
   quoteForDisplay,
   commandLine,
   isDockerAvailable,
+  dockerDesktopCandidates,
+  startDockerDaemon,
+  waitForDocker,
+  ensureDockerAvailable,
   imageExists,
   canBuildBundledImage,
   buildBundledImage,
+  buildLocalSidecarArgs,
+  runLocalSidecar,
   helpText,
   resolveScopeFiles,
   resolveScopedTarget,
