@@ -292,7 +292,7 @@ Liberar acesso local do Codex/API no Windows, quando o bloqueio for firewall loc
 code-approval-gates doctor semantic --fix-network --yes
 ```
 
-Esse comando exige PowerShell como Administrador. Se for tentado sem admin, o doctor retorna erro claro com o comando para repetir elevado. Ele cria regras outbound TCP 443 para o runtime Codex/Node e testa `api.openai.com:443`; nao salva credenciais e nao altera o CyberVinci.
+Esse comando precisa de permissao de Administrador. Se for tentado sem admin no Windows, o doctor tenta se relancar elevado via UAC automaticamente; se a elevacao for cancelada ou bloqueada, ele retorna erro claro com o comando para repetir em PowerShell Administrador. Ele cria regras outbound TCP 443 para o runtime Codex/Node e testa `api.openai.com:443`; nao salva credenciais e nao altera o CyberVinci.
 
 Reinstalar o pacote globalmente de forma explicita:
 
@@ -706,7 +706,7 @@ Allow local Codex/API access on Windows when the blocker is local firewall:
 code-approval-gates doctor semantic --fix-network --yes
 ```
 
-This command requires Administrator PowerShell. If it is attempted without admin, doctor returns a clear error with the command to repeat elevated. It creates outbound TCP 443 rules for the Codex/Node runtime and checks `api.openai.com:443`; it does not save credentials or change CyberVinci.
+This command requires Administrator permission. If it is attempted without admin on Windows, doctor tries to relaunch itself elevated through UAC automatically; if elevation is cancelled or blocked, it returns a clear error with the command to repeat in Administrator PowerShell. It creates outbound TCP 443 rules for the Codex/Node runtime and checks `api.openai.com:443`; it does not save credentials or change CyberVinci.
 
 Explicitly reinstall the package globally:
 

@@ -14,6 +14,7 @@ const {
   matchesPattern,
   buildEquivalentCommand,
   buildBaselineSourceScanArgs,
+  buildElevatedDoctorCommand,
   readObjective,
   normalizedOptions,
   helpFor,
@@ -239,6 +240,7 @@ test("parseArgs keeps operational boolean flags out of passthrough", () => {
     "--non-blocking",
     "--fix",
     "--fix-network",
+    "--elevated-child",
     "--yes",
     "--install-global"
   ]);
@@ -248,11 +250,13 @@ test("parseArgs keeps operational boolean flags out of passthrough", () => {
   assert.equal(parsed.options.nonBlocking, true);
   assert.equal(parsed.options.fix, true);
   assert.equal(parsed.options.fixNetwork, true);
+  assert.equal(parsed.options.elevatedChild, true);
   assert.equal(parsed.options.yes, true);
   assert.equal(parsed.options.installGlobal, true);
   assert.equal(parsed.options.passthrough.includes("--objective-stdin"), false);
   assert.equal(parsed.options.passthrough.includes("--non-blocking"), false);
   assert.equal(parsed.options.passthrough.includes("--fix-network"), false);
+  assert.equal(parsed.options.passthrough.includes("--elevated-child"), false);
   assert.equal(parsed.options.passthrough.includes("--yes"), false);
   assert.equal(parsed.options.passthrough.includes("--install-global"), false);
 });
@@ -491,6 +495,18 @@ test("buildBaselineSourceScanArgs propagates source scan options", () => {
   assert.equal(noSemanticArgs.includes("--objective-stdin"), false);
   assert.equal(noSemanticArgs.includes("--provider"), false);
   assert.equal(noSemanticArgs.includes("--model"), false);
+});
+
+test("buildElevatedDoctorCommand creates a non-recursive elevated network repair command", () => {
+  const command = buildElevatedDoctorCommand("C:\\Repo With Spaces", {
+    json: true,
+    noInteractive: true
+  });
+
+  assert.match(command, /doctor semantic --fix-network --yes --elevated-child/);
+  assert.match(command, /--cwd "C:\\Repo With Spaces"/);
+  assert.match(command, /--json/);
+  assert.match(command, /--no-interactive/);
 });
 
 test("help text lists all public commands and baseline scope flags", () => {

@@ -108,7 +108,7 @@ If Codex CLI works normally but the gate reports provider network errors, check 
 code-approval-gates doctor semantic --fix-network --yes --no-interactive
 ```
 
-This may require Administrator PowerShell. It only applies to local Windows firewall access for the Codex/Node runtime; it cannot override a parent sandbox, VPN, corporate proxy, or external firewall.
+On Windows, this tries to relaunch itself elevated through UAC when it is not already running as admin. It only applies to local Windows firewall access for the Codex/Node runtime; it cannot override a parent sandbox, VPN, corporate proxy, or external firewall.
 
 If the unified command is missing but this repository is available, install from the repository root:
 
