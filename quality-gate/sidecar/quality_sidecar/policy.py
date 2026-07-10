@@ -113,10 +113,18 @@ def evaluate_policy(
         for result in tool_results
         if getattr(result, "name", "") == "coverage" and getattr(result, "status", "") in {"missing", "error", "timeout"}
     ]
+    required_evidence_errors = [
+        getattr(result, "name", "evidence")
+        for result in tool_results
+        if getattr(result, "status", "") in {"missing", "error", "timeout"}
+        and bool((getattr(result, "summary", {}) or {}).get("required"))
+    ]
 
     reasons: list[str] = []
     if coverage_errors:
         reasons.append("Coverage analysis was requested but did not produce sufficient evidence.")
+    if required_evidence_errors:
+        reasons.append("Required deterministic evidence was missing, invalid, or unavailable.")
     if tool_errors and (mode == "full" or fail_on_tool_error):
         reasons.append("One or more required analysis tools failed or were unavailable.")
 
@@ -144,8 +152,21 @@ def evaluate_policy(
             tool_errors=tool_errors,
         )
 
-    blocking_categories = {"coverage", "secrets"}
-    has_blocking_finding = any(finding.category in blocking_categories for finding in active)
+    blocking_categories = {
+        "architecture-policy",
+        "change-policy",
+        "contract-policy",
+        "coverage",
+        "quality-budget",
+        "quality-evidence",
+        "secrets",
+        "test-quality",
+    }
+    blocking_tools = {"change-policy", "dependency-graph", "quality-budget", "quality-evidence", "test-quality"}
+    has_blocking_finding = any(
+        finding.category in blocking_categories or finding.tool in blocking_tools
+        for finding in active
+    )
     has_critical = any(finding.severity == "critical" for finding in active)
 
     if score < resolved_threshold or has_blocking_finding or has_critical:
@@ -156,6 +177,12 @@ def evaluate_policy(
                 reasons.append("Active secret finding blocks approval.")
             if any(finding.category == "coverage" for finding in active):
                 reasons.append("Active coverage finding blocks approval.")
+            if any(
+                finding.category in blocking_categories - {"coverage", "secrets"}
+                or finding.tool in blocking_tools
+                for finding in active
+            ):
+                reasons.append("Active deterministic quality policy finding blocks approval.")
         if has_critical:
             reasons.append("Active critical finding blocks approval.")
         return PolicyResult(

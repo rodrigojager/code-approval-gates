@@ -8,7 +8,11 @@
   "format": "json,md",
   "output": ".quality/reports/latest",
   "quality": {
-    "enabled": true
+    "enabled": true,
+    "profile": "standard",
+    "dependencyGraphs": [],
+    "evidenceReports": [],
+    "testReports": []
   },
   "semantic": {
     "enabled": true,

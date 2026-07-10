@@ -142,6 +142,22 @@ code-approval-gates run --gate quality --scope changed
 
 Quando Docker nao esta instalado, iniciado ou acessivel, o Quality Gate tenta iniciar o Docker automaticamente e espera o daemon ficar pronto. Se o Docker nao subir dentro do limite, ele usa o sidecar Python empacotado em modo `offline`. Use `--no-start-docker` para pular a tentativa de inicializacao, `--docker-start-timeout-ms <ms>` para ajustar a espera, e `--mode quick`, `--mode offline` ou `--mode full` para escolher o modo do sidecar; `full` continua dependendo das ferramentas externas disponiveis no ambiente.
 
+O Quality Gate tambem aplica budgets independentes de linguagem em todos os modos: bytes/linhas por arquivo, quantidade e tamanho das alteracoes, bytes do diff, binarios alterados e hotspots do historico Git. Os perfis usam limites conservadores e cada valor pode ser sobrescrito; `0` desativa apenas aquele budget:
+
+```powershell
+code-approval-gates quality --scope changed --profile strict --max-file-lines 1500 --max-changed-files 40
+```
+
+Regras mais especificas ficam em `.quality-gate-policy.json`: budgets, obrigacao de arquivos acompanhantes, limites de grafo e thresholds de evidencias. Ciclos, fan-in/fan-out e camadas usam um grafo JSON normalizado. JUnit XML fornece evidencia de testes. Mutacao, complexidade, tamanho de modelos e breaking changes usam um JSON neutro produzido pelo analisador de qualquer linguagem e validado pelo mesmo gate:
+
+```powershell
+code-approval-gates quality --dependency-graph .quality/evidence/dependency-graph.json
+code-approval-gates quality --evidence-report .quality/evidence/quality-evidence.json
+code-approval-gates quality --test-report .quality/evidence/junit.xml --min-tests 10
+```
+
+Veja `quality-gate/examples/quality-gate-policy.example.json` e `quality-gate/README.md`. Evidencia solicitada, mas ausente/invalida, retorna `NEEDS_CHANGES`/exit `2`; violacao deterministica retorna `REJECTED`/exit `1`.
+
 Rodar somente o Semantic Gate:
 
 ```powershell
@@ -555,6 +571,22 @@ code-approval-gates run --gate quality --scope changed
 ```
 
 When Docker is not installed, running, or accessible, the Quality Gate tries to start Docker automatically and waits for the daemon to become ready. If Docker does not come up within the timeout, it uses the bundled Python sidecar in `offline` mode. Use `--no-start-docker` to skip startup, `--docker-start-timeout-ms <ms>` to tune the wait, and `--mode quick`, `--mode offline`, or `--mode full` to choose the sidecar mode; `full` still depends on external tools available in the environment.
+
+Quality Gate also applies language-independent budgets in every mode: bytes/lines per file, change count and size, diff bytes, changed binaries, and Git-history hotspots. Profiles use conservative limits and every value can be overridden; `0` disables only that budget:
+
+```powershell
+code-approval-gates quality --scope changed --profile strict --max-file-lines 1500 --max-changed-files 40
+```
+
+More specific rules live in `.quality-gate-policy.json`: budgets, companion-file requirements, graph limits, and evidence thresholds. Cycles, fan-in/fan-out, and layers use normalized graph JSON. JUnit XML provides test evidence. Mutation, complexity, model size, and breaking changes use neutral JSON emitted by an analyzer for any language and validated by the same gate:
+
+```powershell
+code-approval-gates quality --dependency-graph .quality/evidence/dependency-graph.json
+code-approval-gates quality --evidence-report .quality/evidence/quality-evidence.json
+code-approval-gates quality --test-report .quality/evidence/junit.xml --min-tests 10
+```
+
+See `quality-gate/examples/quality-gate-policy.example.json` and `quality-gate/README.md`. Requested but missing/invalid evidence returns `NEEDS_CHANGES`/exit `2`; a deterministic violation returns `REJECTED`/exit `1`.
 
 Run only Semantic Gate:
 

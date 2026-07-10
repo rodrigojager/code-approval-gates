@@ -112,6 +112,8 @@ Approval requires:
 - scope matches what the user requested;
 - `scoreAppliesTo` matches the scope being summarized.
 
+Also inspect `quality-report.json.metrics` for effective budgets, observed file/change sizes, diff bytes, binary count, and hotspot evidence. If the project configures `.quality-gate-policy.json`, dependency graphs, JUnit, or neutral evidence reports, rerun with the same files and thresholds; missing requested evidence is not approval.
+
 ## Fix Loop
 
 1. Run the same quality command with the same threshold, profile, scope, paths, ignores, optional checks, and baseline.

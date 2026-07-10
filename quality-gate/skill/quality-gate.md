@@ -107,6 +107,10 @@ The deterministic Quality Gate owns:
 - duplication detection;
 - IaC scanners;
 - optional secret/PII checks;
+- language-agnostic file, diff, binary, and Git-hotspot budgets;
+- declarative companion-change policies;
+- normalized dependency-graph checks for cycles, fan-in/fan-out, and layers;
+- JUnit and neutral metric/check evidence produced by stack-specific adapters;
 - normalized deterministic scoring.
 
 The Semantic Gate owns reasoning about:
@@ -137,6 +141,8 @@ Approval requires:
 - no hard blockers;
 - requested scope was actually analyzed;
 - `scoreAppliesTo` matches the scope being reported.
+- requested deterministic evidence is present and valid;
+- `metrics` stays within its effective budgets.
 
 ## Fix Loop
 
