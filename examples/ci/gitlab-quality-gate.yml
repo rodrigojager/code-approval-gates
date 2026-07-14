@@ -1,17 +1,56 @@
-quality_gate:
-  stage: test
-  image: node:22
-  variables:
-    GIT_DEPTH: "0"
-  before_script:
-    - npm install -g code-approval-gates
+---
+variables:
+  CODE_APPROVAL_QUALITY_ENABLED: "true"
+  CODE_APPROVAL_QUALITY_BLOCKING: "false"
+  CODE_APPROVAL_QUALITY_IMAGE: "ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0"
+  CODE_APPROVAL_QUALITY_THRESHOLD: "90"
+  CODE_APPROVAL_QUALITY_ENABLE_PII: "false"
+  CODE_APPROVAL_QUALITY_ENABLE_SECRETS: "true"
+  CODE_APPROVAL_QUALITY_ENABLE_COVERAGE: "false"
+  CODE_APPROVAL_QUALITY_COVERAGE_REPORT: "TestResults/**/coverage.cobertura.xml"
+  CODE_APPROVAL_QUALITY_MIN_LINE_COVERAGE: "80"
+
+code_approval_quality:
+  stage: quality
+  image:
+    name: "$CODE_APPROVAL_QUALITY_IMAGE"
+    entrypoint: [""]
+    docker:
+      user: "0"
   script:
-    - code-approval-gates doctor quality --ci --no-interactive
-    - code-approval-gates quality --ci --scope changed --format json,md --output code-approval-report --no-interactive
+    - |
+      set -- check "$CI_PROJECT_DIR" \
+        --mode full \
+        --threshold "$CODE_APPROVAL_QUALITY_THRESHOLD" \
+        --fail-on-tool-error \
+        --format json,md \
+        --output .quality/reports
+
+      if [ "$CODE_APPROVAL_QUALITY_ENABLE_SECRETS" = "true" ]; then
+        set -- "$@" --enable-secrets
+      fi
+
+      if [ "$CODE_APPROVAL_QUALITY_ENABLE_PII" = "true" ]; then
+        set -- "$@" --enable-pii
+      fi
+
+      if [ "$CODE_APPROVAL_QUALITY_ENABLE_COVERAGE" = "true" ]; then
+        set -- "$@" \
+          --enable-coverage \
+          --coverage-report "$CODE_APPROVAL_QUALITY_COVERAGE_REPORT" \
+          --min-line-coverage "$CODE_APPROVAL_QUALITY_MIN_LINE_COVERAGE"
+      fi
+
+      quality-sidecar "$@"
   artifacts:
     when: always
     paths:
-      - code-approval-report/
+      - .quality/reports/quality-report.json
+      - .quality/reports/quality-report.md
     expire_in: 14 days
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" && $CODE_APPROVAL_QUALITY_ENABLED == "true" && $CODE_APPROVAL_QUALITY_BLOCKING == "true"'
+      allow_failure: false
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" && $CODE_APPROVAL_QUALITY_ENABLED == "true"'
+      allow_failure: true
+    - when: never

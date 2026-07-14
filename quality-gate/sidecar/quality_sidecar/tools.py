@@ -5,10 +5,11 @@ import os
 import shutil
 import subprocess
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+import defusedxml.ElementTree as ET
 
 from .detectors import detect_iac_files
 from .findings import Finding, normalize_severity
@@ -137,7 +138,7 @@ def run_external_tools(
         return [], []
 
     raw_dir = reports_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_raw_dir(raw_dir)
     results: list[ToolResult] = []
     findings: list[Finding] = []
     iac_files = detect_iac_files(root)
@@ -192,6 +193,78 @@ def run_external_tools(
     return results, findings
 
 
+RAW_EVIDENCE_MARKER = ".code-approval-quality-gate-owned"
+RAW_EVIDENCE_FILES = {
+    "checkov.json",
+    "gitleaks.json",
+    "osv-scanner.json",
+    "semgrep.json",
+    "trivy.json",
+    *{
+        f"{tool}.{stream}.log"
+        for tool in (
+            "checkov",
+            "gitleaks",
+            "jscpd",
+            "megalinter",
+            "osv-scanner",
+            "project-tests",
+            "semgrep",
+            "trivy",
+        )
+        for stream in ("stdout", "stderr")
+    },
+}
+RAW_EVIDENCE_DIRS = {"jscpd", "megalinter"}
+
+
+def _prepare_raw_dir(raw_dir: Path) -> None:
+    if raw_dir.is_symlink():
+        raise RuntimeError(f"Refusing unsafe raw evidence directory symlink: {raw_dir}")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    marker = raw_dir / RAW_EVIDENCE_MARKER
+    if marker.is_symlink():
+        raise RuntimeError(f"Refusing unsafe raw evidence marker symlink: {marker}")
+
+    for name in RAW_EVIDENCE_FILES | RAW_EVIDENCE_DIRS:
+        path = raw_dir / name
+        if path.is_symlink():
+            raise RuntimeError(f"Refusing unsafe raw evidence output symlink: {path}")
+
+    if marker.is_file():
+        for name in RAW_EVIDENCE_FILES:
+            path = raw_dir / name
+            if path.is_file():
+                path.unlink()
+        for name in RAW_EVIDENCE_DIRS:
+            path = raw_dir / name
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+
+    marker.write_text("Owned by code-approval-quality-gate.\n", encoding="utf-8")
+
+
+MEGALINTER_ENABLED_LINTERS = ",".join(
+    [
+        "ACTION_ACTIONLINT",
+        "BASH_SHELLCHECK",
+        "CSHARP_CSHARPIER",
+        "CSHARP_DOTNET_FORMAT",
+        "CSHARP_ROSLYNATOR",
+        "DOCKERFILE_HADOLINT",
+        "HTML_HTMLHINT",
+        "JAVASCRIPT_ES",
+        "MARKDOWN_MARKDOWNLINT",
+        "POWERSHELL_POWERSHELL",
+        "TYPESCRIPT_STANDARD",
+        "XML_XMLLINT",
+        "YAML_YAMLLINT",
+    ]
+)
+
+
 def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
     configured = os.environ.get("MEGALINTER_COMMAND")
     command = [configured] if configured else ["/entrypoint.sh"]
@@ -204,8 +277,11 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         "PRINT_ALL_FILES": "false",
         "SHOW_ELAPSED_TIME": "true",
         "FILTER_REGEX_EXCLUDE": r"(\.quality/|node_modules/|coverage/|dist/|tmp/)",
+        "ENABLE_LINTERS": MEGALINTER_ENABLED_LINTERS,
+        "JAVASCRIPT_ES_RULES_PATH": "../../opt/quality-sidecar/sidecar/config",
+        "JAVASCRIPT_ES_CONFIG_FILE": "eslint.config.mjs",
     }
-    return run_command(
+    result = run_command(
         "megalinter",
         command,
         raw_dir,
@@ -214,13 +290,53 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         acceptable_exit_codes={0, 1},
         output_path=raw_dir / "megalinter",
     )
+    if result.exit_code == 1:
+        error_logs = _megalinter_error_logs(Path(result.output_path or ""))
+        fatal_logs = [path for path in error_logs if "Fatal error while calling" in _read_text(path)]
+        if not error_logs:
+            result.status = "error"
+            result.error = "MegaLinter failed without producing analyzer logs."
+        elif fatal_logs:
+            result.status = "error"
+            result.error = "One or more MegaLinter analyzers could not start."
+            result.summary["fatalAnalyzers"] = [path.stem.removesuffix("-ERROR") for path in fatal_logs]
+        else:
+            result.status = "findings"
+        result.summary["failedAnalyzers"] = [path.stem.removesuffix("-ERROR") for path in error_logs]
+    return result
+
+
+def _megalinter_error_logs(output_dir: Path) -> list[Path]:
+    logs_dir = output_dir / "linters_logs"
+    return sorted(logs_dir.glob("*-ERROR.log")) if logs_dir.is_dir() else []
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _run_semgrep(root: Path, raw_dir: Path) -> ToolResult:
     output = raw_dir / "semgrep.json"
     return run_command(
         "semgrep",
-        ["semgrep", "scan", "--config=auto", "--json", "--output", str(output), str(root)],
+        [
+            "semgrep",
+            "scan",
+            "--config=auto",
+            "--exclude",
+            ".git",
+            "--exclude",
+            ".quality",
+            "--exclude",
+            "node_modules",
+            "--json",
+            "--output",
+            str(output),
+            str(root),
+        ],
         raw_dir,
         cwd=root,
         acceptable_exit_codes={0, 1},
@@ -234,6 +350,7 @@ def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
         "gitleaks",
         [
             "gitleaks",
+            "--redact=100",
             "detect",
             "--source",
             str(root),
@@ -253,6 +370,8 @@ def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
 def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult:
     output = raw_dir / "trivy.json"
     scanners = "vuln,misconfig,secret" if enable_secrets else "vuln,misconfig"
+    skipped_directories = [root / name for name in (".git", ".quality", "node_modules", "vendor")]
+    skip_args = [argument for directory in skipped_directories for argument in ("--skip-dirs", str(directory))]
     return run_command(
         "trivy",
         [
@@ -266,6 +385,7 @@ def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult
             str(output),
             "--exit-code",
             "0",
+            *skip_args,
             str(root),
         ],
         raw_dir,
@@ -273,6 +393,12 @@ def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult
         acceptable_exit_codes={0},
         output_path=output,
     )
+
+
+def _copy_stdout_to_output(result: ToolResult, output: Path) -> None:
+    stdout_path = Path(result.stdout_path) if result.stdout_path else None
+    if stdout_path and stdout_path.exists():
+        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
 
 
 def _run_checkov(root: Path, raw_dir: Path, iac_files: list[str]) -> ToolResult:
@@ -285,9 +411,7 @@ def _run_checkov(root: Path, raw_dir: Path, iac_files: list[str]) -> ToolResult:
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
-    stdout_path = Path(result.stdout_path) if result.stdout_path else None
-    if stdout_path and stdout_path.exists():
-        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    _copy_stdout_to_output(result, output)
     result.summary["iacFiles"] = len(iac_files)
     result.summary["iacFileSamples"] = iac_files[:20]
     return result
@@ -303,9 +427,7 @@ def _run_osv_scanner(root: Path, raw_dir: Path) -> ToolResult:
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
-    stdout_path = Path(result.stdout_path) if result.stdout_path else None
-    if stdout_path and stdout_path.exists():
-        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    _copy_stdout_to_output(result, output)
     stderr_path = Path(result.stderr_path) if result.stderr_path else None
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path and stderr_path.exists() else ""
     if result.status == "error" and "No package sources found" in stderr_text:
@@ -326,7 +448,7 @@ def _run_jscpd(root: Path, raw_dir: Path) -> ToolResult:
             "--reporters",
             "json",
             "--ignore",
-            "**/.quality/**,**/node_modules/**,.quality/**,node_modules/**",
+            "**/*.md,**/.quality/**,**/node_modules/**,.quality/**,node_modules/**",
             "--output",
             str(output_dir),
             ".",
@@ -672,9 +794,64 @@ def _int_attr(element: ET.Element, name: str) -> int | None:
     return int(value) if value is not None and value != "" else None
 
 
+def _missing_npm_workspaces(root: Path, package_json: Path) -> list[str]:
+    try:
+        package = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    workspaces = package.get("workspaces", [])
+    patterns = workspaces.get("packages", []) if isinstance(workspaces, dict) else workspaces
+    if not isinstance(patterns, list):
+        return []
+
+    missing: list[str] = []
+    for pattern in patterns:
+        if not isinstance(pattern, str):
+            continue
+        matches = [path for path in root.glob(pattern) if (path / "package.json").is_file()]
+        if not matches:
+            missing.append(pattern)
+    return missing
+
+
+def _project_test_outcome(result: ToolResult, *, path: str, message: str) -> tuple[ToolResult, list[Finding]]:
+    if result.exit_code in {None, 0}:
+        return result, []
+    result.status = "findings"
+    return result, [
+        Finding(
+            tool="project-tests",
+            rule="tests.failed",
+            severity="high",
+            category="tests",
+            path=path,
+            message=message,
+        )
+    ]
+
+
 def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
     package_json = root / "package.json"
     if package_json.exists() and shutil.which("npm"):
+        missing_workspaces = _missing_npm_workspaces(root, package_json)
+        if missing_workspaces:
+            scope = os.environ.get("QUALITY_CHECK_SCOPE", "full")
+            if scope not in {"changed", "paths"}:
+                return ToolResult(
+                    name="project-tests",
+                    status="error",
+                    error="Project tests cannot run because npm workspaces are absent from the full checkout.",
+                    summary={"missingWorkspaces": missing_workspaces},
+                ), []
+            return ToolResult(
+                name="project-tests",
+                status="skipped",
+                summary={
+                    "reason": "Project tests require npm workspaces absent from the analyzed checkout.",
+                    "missingWorkspaces": missing_workspaces,
+                },
+            ), []
         result = run_command(
             "project-tests",
             ["npm", "test", "--if-present"],
@@ -682,20 +859,7 @@ def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, lis
             cwd=root,
             acceptable_exit_codes={0, 1},
         )
-        findings = []
-        if result.exit_code not in {None, 0}:
-            result.status = "findings"
-            findings.append(
-                Finding(
-                    tool="project-tests",
-                    rule="tests.failed",
-                    severity="high",
-                    category="tests",
-                    path="package.json",
-                    message="Project test command failed.",
-                )
-            )
-        return result, findings
+        return _project_test_outcome(result, path="package.json", message="Project test command failed.")
 
     pyproject = root / "pyproject.toml"
     tests_dir = root / "tests"
@@ -707,20 +871,7 @@ def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, lis
             cwd=root,
             acceptable_exit_codes={0, 1},
         )
-        findings = []
-        if result.exit_code not in {None, 0}:
-            result.status = "findings"
-            findings.append(
-                Finding(
-                    tool="project-tests",
-                    rule="tests.failed",
-                    severity="high",
-                    category="tests",
-                    path="tests",
-                    message="Python unittest discovery failed.",
-                )
-            )
-        return result, findings
+        return _project_test_outcome(result, path="tests", message="Python unittest discovery failed.")
 
     return None, []
 
@@ -746,6 +897,8 @@ def parse_json(path: str | None) -> Any | None:
 def parse_tool_findings(name: str, result: ToolResult, root: Path) -> list[Finding]:
     if result.status in {"missing", "timeout", "error"}:
         return []
+    if name == "megalinter":
+        return _parse_megalinter(result)
     if name == "semgrep":
         return _parse_semgrep(parse_json(result.output_path), root)
     if name == "gitleaks":
@@ -759,6 +912,24 @@ def parse_tool_findings(name: str, result: ToolResult, root: Path) -> list[Findi
     if name == "jscpd":
         return _parse_jscpd(parse_json(result.output_path), root)
     return []
+
+
+def _parse_megalinter(result: ToolResult) -> list[Finding]:
+    findings: list[Finding] = []
+    for log_path in _megalinter_error_logs(Path(result.output_path or "")):
+        analyzer = log_path.stem.removesuffix("-ERROR")
+        findings.append(
+            Finding(
+                tool="megalinter",
+                rule=f"megalinter.{analyzer.lower().replace('_', '-')}",
+                severity="high",
+                category="lint",
+                path="",
+                message=f"MegaLinter analyzer {analyzer} reported one or more blocking errors.",
+                metadata={"log": str(log_path)},
+            )
+        )
+    return findings
 
 
 def _normalize_path(value: str | None, root: Path) -> str:

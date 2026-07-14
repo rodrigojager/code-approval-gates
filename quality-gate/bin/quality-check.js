@@ -295,6 +295,10 @@ function buildDockerArgs(parsed, targetPath, reportsPath = path.join(targetPath,
   return [
     "run",
     "--rm",
+    "--user",
+    "0",
+    "-e",
+    `QUALITY_CHECK_SCOPE=${parsed.scope}`,
     ...parsed.dockerArgs,
     "-v",
     `${targetPath}:/workspace`,
@@ -582,32 +586,37 @@ function matchesPattern(file, pattern) {
     return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`) || normalizedFile.includes(`/${prefix}/`);
   }
   if (!normalizedPattern.includes("/")) {
-    return normalizedFile.split("/").some((part) => globRegex(normalizedPattern).test(part));
+    return normalizedFile.split("/").some((part) => globMatches(part, normalizedPattern));
   }
-  return globRegex(normalizedPattern).test(normalizedFile);
+  return globMatches(normalizedFile, normalizedPattern);
 }
 
-function globRegex(pattern) {
-  let out = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index];
-    const next = pattern[index + 1];
-    if (char === "*" && next === "*") {
-      out += ".*";
-      index += 1;
-    } else if (char === "*") {
-      out += "[^/]*";
-    } else if (char === "?") {
-      out += "[^/]";
-    } else {
-      out += escapeRegex(char);
+function globMatches(value, pattern) {
+  const memo = new Map();
+  const match = (valueIndex, patternIndex) => {
+    const key = `${valueIndex}:${patternIndex}`;
+    if (memo.has(key)) {
+      return memo.get(key);
     }
-  }
-  return new RegExp(`${out}$`);
-}
-
-function escapeRegex(value) {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
+    let matched;
+    if (patternIndex === pattern.length) {
+      matched = valueIndex === value.length;
+    } else if (pattern[patternIndex] === "*" && pattern[patternIndex + 1] === "*") {
+      matched = match(valueIndex, patternIndex + 2) ||
+        (valueIndex < value.length && match(valueIndex + 1, patternIndex));
+    } else if (pattern[patternIndex] === "*") {
+      matched = match(valueIndex, patternIndex + 1) ||
+        (valueIndex < value.length && value[valueIndex] !== "/" && match(valueIndex + 1, patternIndex));
+    } else if (pattern[patternIndex] === "?") {
+      matched = valueIndex < value.length && value[valueIndex] !== "/" && match(valueIndex + 1, patternIndex + 1);
+    } else {
+      matched = valueIndex < value.length && value[valueIndex] === pattern[patternIndex] &&
+        match(valueIndex + 1, patternIndex + 1);
+    }
+    memo.set(key, matched);
+    return matched;
+  };
+  return match(0, 0);
 }
 
 function isDockerAvailable(env = process.env, runner = spawnSync) {
@@ -786,7 +795,10 @@ function runLocalSidecar(parsed, scopedTarget, reportsPath, env = process.env, r
   console.error("Docker is not available; running bundled Quality Gate sidecar locally in offline mode.");
   const result = runner(command, args, {
     stdio: "inherit",
-    env: localSidecarEnv(env)
+    env: {
+      ...localSidecarEnv(env),
+      QUALITY_CHECK_SCOPE: parsed.scope
+    }
   });
   if (result.error) {
     console.error(`Failed to run local quality sidecar: ${result.error.message}`);
@@ -868,7 +880,7 @@ function scoreAppliesToForScope(scope) {
   return scope === "full" ? "entire-project" : scope === "paths" ? "selected-paths" : "changed-files";
 }
 
-function augmentQualityReports(reportsPath, scope, parsed) {
+function augmentQualityReports(reportsPath, scope) {
   const jsonPath = path.join(reportsPath, "quality-report.json");
   const markdownPath = path.join(reportsPath, "quality-report.md");
   if (fs.existsSync(jsonPath)) {
@@ -929,7 +941,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
 
   if (!ensureDockerAvailable(parsed, env, runner, starter)) {
     const exitCode = runLocalSidecar(parsed, scopedTarget, reportsPath, env, runner);
-    augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
+    augmentQualityReports(reportsPath, scopedTarget.scope);
     return exitCode;
   }
 
@@ -962,7 +974,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
     return 3;
   }
 
-  augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
+  augmentQualityReports(reportsPath, scopedTarget.scope);
   return result.status ?? 3;
 }
 
@@ -997,4 +1009,3 @@ module.exports = {
   normalizeFormatValue,
   runDockerWrapper
 };
-
