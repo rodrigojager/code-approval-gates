@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    {
+      "id": "domain/orders",
+      "layer": "domain"
+    },
+    {
+      "id": "application/checkout",
+      "layer": "application"
+    },
+    {
+      "id": "infrastructure/database",
+      "layer": "infrastructure"
+    }
+  ],
+  "edges": [
+    {
+      "from": "application/checkout",
+      "to": "domain/orders"
+    },
+    {
+      "from": "infrastructure/database",
+      "to": "domain/orders"
+    }
+  ]
+}

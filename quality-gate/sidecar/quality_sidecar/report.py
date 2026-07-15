@@ -19,6 +19,7 @@ def build_report(
     stack: dict[str, Any],
     findings: list[Finding],
     tool_results: list[ToolResult],
+    metrics: dict[str, Any],
 ) -> dict[str, Any]:
     report = {
         "schemaVersion": "1.0.0",
@@ -39,6 +40,7 @@ def build_report(
             "toolErrors": policy.tool_errors,
         },
         "stack": stack,
+        "metrics": metrics,
         "tools": [result.to_dict() for result in tool_results],
         "findings": [finding.to_dict() for finding in findings],
     }
@@ -83,6 +85,17 @@ def write_markdown_report(report: dict[str, Any], output_dir: Path) -> Path:
             lines.append(f"| {tool.get('name')} | {tool.get('status')} | {exit_code if exit_code is not None else ''} | {findings} |")
     else:
         lines.append("- No external tools were executed.")
+
+    metrics = report.get("metrics") or {}
+    totals = metrics.get("totals") or {}
+    change = metrics.get("change") or {}
+    lines.extend(["", "## Deterministic Metrics", ""])
+    lines.append(f"- Files: {totals.get('files', 0)}")
+    lines.append(f"- Bytes: {totals.get('bytes', 0)}")
+    lines.append(f"- Text lines: {totals.get('lines', 0)}")
+    lines.append(f"- Changed files: {change.get('files', 0)}")
+    lines.append(f"- Changed lines: {change.get('changedLines', 0)}")
+    lines.append(f"- Diff bytes: {change.get('patchBytes', 0)}")
 
     lines.extend(["", "## Findings", ""])
     findings = report.get("findings") or []

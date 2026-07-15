@@ -113,12 +113,17 @@ def is_probably_text(path: Path) -> bool:
     return b"\0" not in chunk
 
 
-def iter_source_files(root: Path) -> Iterable[Path]:
+def iter_project_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
         if path.is_dir():
             continue
         if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
             continue
+        yield path
+
+
+def iter_source_files(root: Path) -> Iterable[Path]:
+    for path in iter_project_files(root):
         if is_probably_text(path):
             yield path
 

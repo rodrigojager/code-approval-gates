@@ -177,7 +177,9 @@ test("buildDockerArgs creates the expected sidecar invocation", () => {
   assert.ok(dockerArgs.includes(`${path.join(targetPath, ".quality", "reports")}:/workspace/.quality/reports`));
   assert.ok(dockerArgs.includes("--output"));
   assert.ok(dockerArgs.includes(".quality/reports"));
-  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--scope-manifest"));
+  assert.ok(dockerArgs.includes(".quality/reports/quality-scope.json"));
+  assert.deepEqual(dockerArgs.slice(-2), ["--threshold", "90"]);
 });
 
 test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () => {
@@ -189,6 +191,8 @@ test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () =
   assert.deepEqual(args.slice(0, 4), ["-m", "quality_sidecar", "check", targetPath]);
   assert.ok(args.includes("--output"));
   assert.ok(args.includes(reportsPath));
+  assert.ok(args.includes("--scope-manifest"));
+  assert.ok(args.includes(path.join(reportsPath, "quality-scope.json")));
   assert.ok(args.includes("--mode"));
   assert.ok(args.includes("offline"));
   assert.deepEqual(args.slice(-4), ["--threshold", "90", "--mode", "offline"]);
@@ -276,7 +280,9 @@ test("runDockerWrapper propagates docker run exit code", () => {
   assert.ok(dockerArgs.includes("example/sidecar:test"));
   assert.ok(dockerArgs.includes("--output"));
   assert.ok(dockerArgs.includes(".quality/reports"));
-  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--scope-manifest"));
+  assert.ok(dockerArgs.includes(".quality/reports/quality-scope.json"));
+  assert.deepEqual(dockerArgs.slice(-2), ["--threshold", "90"]);
   assert.ok(fs.existsSync(path.join(target, ".quality", "reports")));
 });
 

@@ -22,10 +22,10 @@ const COMMON_IGNORE=".code-approval-gates.ignore";
 const QUALITY_IGNORE=".quality-gate.ignore";
 const SEMANTIC_IGNORE=".semantic-gate.ignore";
 const DEFAULT_IGNORES=[".git/",".quality/","node_modules/","dist/","build/","coverage/",".turbo/",".vite/","__pycache__/","*.pyc","*.pyo","*.log","*.sqlite","*.sqlite3","*.db"];
-const SUPPORT_FILES=["package.json","package-lock.json","pnpm-lock.yaml","yarn.lock","bun.lockb","tsconfig.json","jsconfig.json","pyproject.toml","requirements.txt","poetry.lock","Dockerfile","docker-compose.yml","docker-compose.yaml",".gitignore",".eslintrc",".eslintrc.json",".prettierrc",".markdownlint.json",".stylelintrc","README.md"];
-const BOOL_FLAGS=new Set(["ci","json","interactive","no-interactive","objective-stdin","fix","fix-network","elevated-child","yes","install-global","non-blocking","no-quality","no-semantic","quality","semantic","pull","no-pull","build","no-build","debug-docker","enable-coverage","enable-secrets","enable-pii","disable-iac","no-iac","allow-pii","allow-secrets","include-untracked","write-reports","no-write-reports","refresh","version","help","progress","no-progress","start-docker","no-start-docker","codex-bypass-sandbox","no-codex-bypass-sandbox","codex-skip-git-repo-check","no-codex-skip-git-repo-check"]);
-const MULTI_FLAGS=new Set(["path","exclude","include","ignore-file","docker-arg","allow-rule","allow-path","waiver","coverage-report"]);
-const KEY_MAP={"no-interactive":"noInteractive","objective-file":"objectiveFile","objective-stdin":"objectiveStdin","non-blocking":"nonBlocking","fix-network":"fixNetwork","elevated-child":"elevatedChild","no-quality":"quality","no-semantic":"semantic","ignore-file":"ignoreFiles","base-url":"baseUrl","api-key-env":"apiKeyEnv","api-key-provider":"apiKeyProvider","reasoning-effort":"reasoningEffort","codex-sandbox":"codexSandbox","codex-bypass-sandbox":"codexBypassSandbox","no-codex-bypass-sandbox":"codexBypassSandbox","codex-skip-git-repo-check":"codexSkipGitRepoCheck","no-codex-skip-git-repo-check":"codexSkipGitRepoCheck","output-dir":"outputDir","report-dir":"reportDir","max-context-chars":"maxContextChars","max-file-chars":"maxFileChars","max-diff-chars":"maxDiffChars","context-strategy":"contextStrategy","timeout-ms":"timeoutMs","command-args":"commandArgs","model-list-command":"modelListCommand","model-list-args":"modelListArgs","command-prompt-mode":"commandPromptMode","command-output":"commandOutput","fail-on-tool-error":"failOnToolError","min-line-coverage":"minLineCoverage","min-branch-coverage":"minBranchCoverage","docker-start-timeout-ms":"dockerStartTimeoutMs","docker-arg":"dockerArgs","allow-rule":"allowRules","allow-path":"allowPaths","coverage-report":"coverageReports"};
+const SUPPORT_FILES=["package.json","package-lock.json","pnpm-lock.yaml","yarn.lock","bun.lockb","tsconfig.json","jsconfig.json","pyproject.toml","requirements.txt","poetry.lock","Dockerfile","docker-compose.yml","docker-compose.yaml",".gitignore",".quality-gate-policy.json",".eslintrc",".eslintrc.json",".prettierrc",".markdownlint.json",".stylelintrc","README.md"];
+const BOOL_FLAGS=new Set(["ci","json","interactive","no-interactive","objective-stdin","fix","fix-network","elevated-child","yes","install-global","non-blocking","no-quality","no-semantic","quality","semantic","pull","no-pull","build","no-build","debug-docker","enable-coverage","enable-secrets","enable-pii","disable-iac","no-iac","allow-pii","allow-secrets","disable-budgets","allow-dependency-cycles","include-untracked","write-reports","no-write-reports","refresh","version","help","progress","no-progress","start-docker","no-start-docker","codex-bypass-sandbox","no-codex-bypass-sandbox","codex-skip-git-repo-check","no-codex-skip-git-repo-check"]);
+const MULTI_FLAGS=new Set(["path","exclude","include","ignore-file","docker-arg","allow-rule","allow-path","waiver","coverage-report","dependency-graph","evidence-report","test-report"]);
+const KEY_MAP={"no-interactive":"noInteractive","objective-file":"objectiveFile","objective-stdin":"objectiveStdin","non-blocking":"nonBlocking","fix-network":"fixNetwork","elevated-child":"elevatedChild","no-quality":"quality","no-semantic":"semantic","ignore-file":"ignoreFiles","base-url":"baseUrl","api-key-env":"apiKeyEnv","api-key-provider":"apiKeyProvider","reasoning-effort":"reasoningEffort","codex-sandbox":"codexSandbox","codex-bypass-sandbox":"codexBypassSandbox","no-codex-bypass-sandbox":"codexBypassSandbox","codex-skip-git-repo-check":"codexSkipGitRepoCheck","no-codex-skip-git-repo-check":"codexSkipGitRepoCheck","output-dir":"outputDir","report-dir":"reportDir","max-context-chars":"maxContextChars","max-file-chars":"maxFileChars","max-diff-chars":"maxDiffChars","context-strategy":"contextStrategy","timeout-ms":"timeoutMs","command-args":"commandArgs","model-list-command":"modelListCommand","model-list-args":"modelListArgs","command-prompt-mode":"commandPromptMode","command-output":"commandOutput","fail-on-tool-error":"failOnToolError","min-line-coverage":"minLineCoverage","min-branch-coverage":"minBranchCoverage","docker-start-timeout-ms":"dockerStartTimeoutMs","docker-arg":"dockerArgs","allow-rule":"allowRules","allow-path":"allowPaths","coverage-report":"coverageReports","dependency-graph":"dependencyGraphs","evidence-report":"evidenceReports","test-report":"testReports"};
 async function main(argv=process.argv.slice(2)){const parsed=parseArgs(argv);const cwd=path.resolve(String(parsed.options.cwd||process.cwd()));const mode=detectExecutionMode(parsed.options);if(parsed.options.version||parsed.command==="version"){writeHumanOrJson(parsed.options,{version:VERSION},`code-approval-gates ${VERSION}\n`);return 0}if(parsed.options.help||parsed.command==="help"){const helpCommand=resolveHelpCommand(parsed);const helpText=helpFor(helpCommand);writeHumanOrJson(parsed.options,helpPayloadFor(helpCommand,helpText),helpText);return 0}if(!parsed.command){if(mode.interactive)return runWizard(cwd,parsed.options);if(parsed.options.json)return fail(parsed.options,2,"MISSING_COMMAND","No command provided in headless mode.","Use code-approval-gates run --scope changed --json --no-interactive, or code-approval-gates --help.");process.stdout.write(helpFor("root"));return 0}switch(parsed.command){case"wizard":if(mode.interactive)return runWizard(cwd,{...parsed.options,interactive:true});return fail(parsed.options,2,"INTERACTIVE_UNAVAILABLE","Interactive wizard cannot run in headless mode.","Use command flags with --no-interactive, or run in a TTY without --ci/--json.");case"init":return handleInit(cwd,parsed.options);case"doctor":return handleDoctor(cwd,parsed);case"run":if(parsed.options.interactive&&mode.interactive)return runWizard(cwd,parsed.options);return handleRun(cwd,parsed.options,"both");case"quality":return handleRun(cwd,{...parsed.options,semantic:false,quality:true},"quality");case"semantic":return handleRun(cwd,{...parsed.options,semantic:true,quality:false},"semantic");case"baseline":return handleBaseline(cwd,parsed);case"report":return handleReport(cwd,parsed);case"config":return handleConfig(cwd,parsed);default:return fail(parsed.options,2,"UNKNOWN_COMMAND",`Unknown command: ${parsed.command}`,"Use code-approval-gates --help.")}}
 function parseArgs(argv){
   const tokens=[...argv];
@@ -170,7 +170,7 @@ function resolveScopeFiles(cwd,options,gateKind){
     }
   }
   const unique=[...new Set(files.map(normalizePath).filter(Boolean))];
-  const filtered=unique.filter(file=>fs.existsSync(path.join(cwd,file))&&fs.statSync(path.join(cwd,file)).isFile()).filter(file=>!isIgnored(file,ignoreRules));
+  const filtered=unique.filter(file=>!isIgnored(file,ignoreRules)).filter(file=>scope==="changed"||(fs.existsSync(path.join(cwd,file))&&fs.statSync(path.join(cwd,file)).isFile()));
   return{scope,base:base||null,head:head||null,files:filtered.sort(),fileCount:filtered.length,ignoredCount:unique.length-filtered.length,ignoreFiles:ignoreRules.files,commands};
 }
 function collectIncludedFiles(cwd,ignoreRules,roots){
@@ -228,7 +228,7 @@ async function runSemanticGate(workspace,outputDir,options,mode){
   const semanticMarkdown=copyIfExists(path.join(sourceDir,"semantic-result.md"),path.join(outputDir,"semantic-report.md"));
   copyDirIfExists(path.join(sourceDir,"raw-provider-output.json"),path.join(outputDir,"raw","semantic","raw-provider-output.json"));
   const report=semanticJson&&fs.existsSync(semanticJson)?readJson(semanticJson):null;
-  return{gate:{name:"semantic",command:commandForDisplay(process.execPath,args),exitCode:result.status??5,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score:typeof report?.score==="number"?report.score:null,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score:typeof report?.score==="number"?report.score:null,semanticJson,semanticMarkdown,error:result.status===0?null:{code:"SEMANTIC_GATE_FAILED",message:trimLog(result.stderr||result.stdout||"Semantic gate failed."),exitCode:result.status??5}};
+  return{gate:{name:"semantic",command:commandForDisplay(process.execPath,args),exitCode:result.status??5,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score:typeof report?.score==="number"?report.score:null,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score:typeof report?.score==="number"?report.score:null,semanticJson,semanticMarkdown,error:gateProcessError(report,result,"SEMANTIC_GATE_FAILED","Semantic gate failed.",5)};
 }
 function appendSemanticOption(args,key,value){if(value===undefined||value===null||value==="")return;args.push(`--${key}`,String(value))}
 function appendScopeOptions(args,options){if(String(options.scope||"full")==="paths")for(const item of options.paths||[])args.push("--path",item);for(const item of options.excludes||[])args.push("--exclude",item);for(const item of options.includes||[])args.push("--include",item);for(const item of options.ignoreFiles||[])args.push("--ignore-file",item)}
@@ -236,8 +236,10 @@ async function runQualityGate(workspace,outputDir,options,mode){
   const qualityOutputDir=path.join(outputDir,"quality-native");
   const args=[QUALITY_BIN,workspace,"--scope",options.scope,"--threshold",String(options.threshold),"--format",options.format,"--output",qualityOutputDir];
   appendScopeOptions(args,options);
-  appendQualityOption(args,"profile",options.profile);
-  appendQualityOption(args,"mode",options.qualityMode||options.mode);
+  appendQualityOption(args,"base",options.base);
+  appendQualityOption(args,"head",options.head);
+  appendQualityOption(args,"profile",qualityConfigValue(options,"profile"));
+  appendQualityOption(args,"mode",options.qualityMode||qualityConfigValue(options,"mode")||options.mode);
   appendQualityOption(args,"image",options.image);
   appendQualityOption(args,"min-line-coverage",options.minLineCoverage);
   appendQualityOption(args,"min-branch-coverage",options.minBranchCoverage);
@@ -260,6 +262,7 @@ async function runQualityGate(workspace,outputDir,options,mode){
   for(const item of options.allowPaths||[])args.push("--allow-path",item);
   for(const item of options.waiver||[])args.push("--waiver",item);
   for(const item of options.dockerArgs||[])args.push("--docker-arg",item);
+  appendLanguageAgnosticQualityOptions(args,options);
   const result=await runGateProcess(process.execPath,args,{cwd:workspace,timeout:Number(options.qualityTimeoutMs||0)||undefined,stdio:mode.headless?["pipe","pipe","pipe"]:"inherit"},progressOptions("quality","deterministic checks",Number(options.qualityTimeoutMs||0)||null,options,mode));
   const qualityJson=copyIfExists(path.join(qualityOutputDir,"quality-report.json"),path.join(outputDir,"quality-report.json"));
   const qualityMarkdown=copyIfExists(path.join(qualityOutputDir,"quality-report.md"),path.join(outputDir,"quality-report.md"));
@@ -267,8 +270,9 @@ async function runQualityGate(workspace,outputDir,options,mode){
   copyDirIfExists(path.join(qualityOutputDir,"raw"),path.join(outputDir,"raw","quality"));
   const report=qualityJson&&fs.existsSync(qualityJson)?readJson(qualityJson):null;
   const score=typeof report?.score?.value==="number"?report.score.value:null;
-  return{gate:{name:"quality",command:commandForDisplay(process.execPath,args),exitCode:result.status??4,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score,qualityJson,qualityMarkdown,error:result.status===0?null:{code:"QUALITY_GATE_FAILED",message:trimLog(result.stderr||result.stdout||"Quality gate failed."),exitCode:result.status??4}}
+  return{gate:{name:"quality",command:commandForDisplay(process.execPath,args),exitCode:result.status??4,status:report?.status||(result.status===0?"APPROVED":"ERROR"),score,stdout:mode.headless?trimLog(result.stdout):undefined,stderr:mode.headless?trimLog(result.stderr):undefined},score,qualityJson,qualityMarkdown,error:gateProcessError(report,result,"QUALITY_GATE_FAILED","Quality gate failed.",4)}
 }
+function gateProcessError(report,result,code,fallback,defaultExitCode){const status=report?.status;const decision=["APPROVED","NEEDS_CHANGES","REJECTED"].includes(status);if(result.status===0&&status==="APPROVED")return null;if(result.status!==0&&decision&&status!=="APPROVED")return null;return{code,message:trimLog(result.stderr||result.stdout||fallback),exitCode:result.status??defaultExitCode}}
 function progressOptions(gate,detail,timeoutMs,options,mode){const forced=options.progress===true||process.env.CODE_APPROVAL_GATES_PROGRESS==="1";const disabled=options.noProgress===true||process.env.CODE_APPROVAL_GATES_PROGRESS==="0";return{enabled:mode.headless&&!disabled&&(forced||process.stderr.isTTY),gate,detail,timeoutMs,intervalMs:Number(options.progressIntervalMs||10000)}}
 function runGateProcess(command,args,options,progress){
   return new Promise(resolve=>{
@@ -301,10 +305,61 @@ function runGateProcess(command,args,options,progress){
 }
 function appendQualityOption(args,key,value){if(value===undefined||value===null||value==="")return;args.push(`--${key}`,String(value))}
 function appendQualityBoolean(args,key,value){if(value)args.push(`--${key}`)}
+function qualityConfigValue(options,key){
+  if(options[key]!==undefined)return options[key];
+  const config=options.qualityConfig||{};
+  if(config[key]!==undefined)return config[key];
+  const aliases={
+    maxDependencyFanIn:["dependencyGraph","maxFanIn"],
+    maxDependencyFanOut:["dependencyGraph","maxFanOut"],
+    allowDependencyCycles:["dependencyGraph","allowCycles"]
+  };
+  const alias=aliases[key];
+  if(alias&&config[alias[0]]?.[alias[1]]!==undefined)return config[alias[0]][alias[1]];
+  for(const sectionName of ["budgets","dependencyGraph","testQuality"]){
+    const section=config[sectionName];
+    if(section&&section[key]!==undefined)return section[key];
+  }
+  return undefined;
+}
+function qualityConfigList(options,key){
+  const config=options.qualityConfig||{};
+  const sectionKey=key==="dependencyGraphs"?"dependencyGraph":key==="testReports"?"testQuality":key==="evidenceReports"?"evidence":null;
+  const configured=Array.isArray(config[key])?config[key]:sectionKey&&Array.isArray(config[sectionKey]?.reports)?config[sectionKey].reports:[];
+  const commandLine=Array.isArray(options[key])?options[key]:[];
+  return[...new Set([...configured,...commandLine].map(String))];
+}
+function appendLanguageAgnosticQualityOptions(args,options){
+  const scalarOptions=[
+    ["policy-file","policyFile"],
+    ["max-file-bytes","maxFileBytes"],
+    ["max-file-lines","maxFileLines"],
+    ["max-scope-bytes","maxScopeBytes"],
+    ["max-scope-lines","maxScopeLines"],
+    ["max-changed-files","maxChangedFiles"],
+    ["max-changed-lines","maxChangedLines"],
+    ["max-diff-bytes","maxDiffBytes"],
+    ["max-binary-files","maxBinaryFiles"],
+    ["hotspot-min-commits","hotspotMinCommits"],
+    ["hotspot-min-churn","hotspotMinChurn"],
+    ["max-dependency-fan-in","maxDependencyFanIn"],
+    ["max-dependency-fan-out","maxDependencyFanOut"],
+    ["min-tests","minTests"],
+    ["max-skipped-tests","maxSkippedTests"],
+    ["max-skipped-percent","maxSkippedPercent"]
+  ];
+  for(const [flag,key] of scalarOptions)appendQualityOption(args,flag,qualityConfigValue(options,key));
+  const budgetConfig=options.qualityConfig?.budgets;
+  appendQualityBoolean(args,"disable-budgets",qualityConfigValue(options,"disableBudgets")===true||budgetConfig?.enabled===false);
+  appendQualityBoolean(args,"allow-dependency-cycles",qualityConfigValue(options,"allowDependencyCycles")===true);
+  for(const item of qualityConfigList(options,"dependencyGraphs"))args.push("--dependency-graph",item);
+  for(const item of qualityConfigList(options,"evidenceReports"))args.push("--evidence-report",item);
+  for(const item of qualityConfigList(options,"testReports"))args.push("--test-report",item);
+}
 function readObjective(options,cwd=process.cwd()){if(options.objectiveStdin)return fs.readFileSync(0,"utf8");if(options.objectiveFile)return fs.readFileSync(path.resolve(cwd,String(options.objectiveFile)),"utf8");if(options.objective)return String(options.objective);return DEFAULT_OBJECTIVE}
 function scoreAppliesToForScope(scope){return scope==="full"?"entire-project":scope==="paths"?"selected-paths":"changed-files"}
 function emptyScopeGates(options){const gates=[];if(options.semantic)gates.push({name:"semantic",command:null,exitCode:0,status:"APPROVED",score:100,skipped:true,message:"No files matched the requested scope after ignore rules."});if(options.quality)gates.push({name:"quality",command:null,exitCode:0,status:"APPROVED",score:100,skipped:true,message:"No files matched the requested scope after ignore rules."});return gates}
-function finalizeSummary(summary,options){const scores=[summary.qualityScore,summary.semanticScore].filter(score=>typeof score==="number");summary.finalScore=scores.length?Math.min(...scores):null;if(summary.errors.length)summary.status="ERROR";else if(summary.finalScore===null)summary.status="NEEDS_CHANGES";else if(summary.baseline&&summary.baseline.newFindingsCount===0&&summary.baseline.existingFindingsCount>0)summary.status="APPROVED";else summary.status=summary.finalScore>=options.threshold?"APPROVED":"NEEDS_CHANGES";summary.finishedAt=new Date().toISOString()}
+function finalizeSummary(summary,options){const scores=[summary.qualityScore,summary.semanticScore].filter(score=>typeof score==="number");summary.finalScore=scores.length?Math.min(...scores):null;const gateNeedsChanges=summary.gates.some(gate=>gate.status!=="APPROVED");if(summary.errors.length)summary.status="ERROR";else if(summary.finalScore===null)summary.status="NEEDS_CHANGES";else if(summary.baseline&&summary.baseline.newFindingsCount===0&&summary.baseline.existingFindingsCount>0)summary.status="APPROVED";else if(gateNeedsChanges)summary.status="NEEDS_CHANGES";else summary.status=summary.finalScore>=options.threshold?"APPROVED":"NEEDS_CHANGES";summary.finishedAt=new Date().toISOString()}
 function writeSummary(outputDir,summary,options){fs.mkdirSync(outputDir,{recursive:true});const jsonPath=path.join(outputDir,"summary.json");const mdPath=path.join(outputDir,"summary.md");summary.reports.summaryJson=jsonPath;summary.reports.summaryMarkdown=mdPath;fs.writeFileSync(jsonPath,`${JSON.stringify(summary,null,2)}\n`,"utf8");fs.writeFileSync(mdPath,renderSummaryMarkdown(summary),"utf8")}
 function renderSummaryMarkdown(summary){return `# Code Approval Gates Report\n\nStatus: ${summary.status}\nScope: ${summary.scope}\nScore applies to: ${summary.scoreAppliesTo||"n/a"}\nMode: ${summary.mode}\nThreshold: ${summary.threshold}\nFinal score: ${summary.finalScore??"n/a"}\nQuality score: ${summary.qualityScore??"n/a"}\nSemantic score: ${summary.semanticScore??"n/a"}\nFiles analyzed: ${summary.scopeResolution?.fileCount??0}\nIgnored files: ${summary.scopeResolution?.ignoredCount??0}\n\n## Command\n\n\`\`\`bash\n${summary.commandEquivalent}\n\`\`\`\n\n## Reports\n\n- Summary JSON: ${summary.reports.summaryJson||"n/a"}\n- Quality JSON: ${summary.reports.qualityJson||"n/a"}\n- Semantic JSON: ${summary.reports.semanticJson||"n/a"}\n\n## Gates\n\n${summary.gates.map(gate=>`- ${gate.name}: ${gate.status} score=${gate.score??"n/a"} exit=${gate.exitCode}`).join("\n")||"- None"}\n\n## Errors\n\n${summary.errors.length?summary.errors.map(error=>`- ${error.code}: ${error.message}`).join("\n"):"- None"}\n`}
 function exitWithSummary(summary,options,code){if(options.json)process.stdout.write(`${JSON.stringify(summary,null,2)}\n`);else process.stdout.write(renderSummaryMarkdown(summary));return code}
@@ -330,6 +385,9 @@ function buildBaselineSourceScanArgs(options){
   for(const item of options.excludes||[])args.push("--exclude",item);
   for(const item of options.includes||[])args.push("--include",item);
   for(const item of options.ignoreFiles||[])args.push("--ignore-file",item);
+  if(options.base)args.push("--base",String(options.base));
+  if(options.head)args.push("--head",String(options.head));
+  if(options.quality!==false)appendLanguageAgnosticQualityOptions(args,options);
   return args;
 }
 function runBaselineSourceScan(cwd,options){const semanticEnabled=!(options.noSemantic||options.semantic===false);const childOptions=options.objectiveStdin?semanticEnabled?{...options,objective:fs.readFileSync(0,"utf8"),objectiveStdin:false}:{...options,objectiveStdin:false}:options;const args=buildBaselineSourceScanArgs(childOptions);const result=spawnSync(process.execPath,args,{cwd,encoding:"utf8",errors:"replace",timeout:Number(options.baselineTimeoutMs||0)||undefined,stdio:options.json?"pipe":"inherit"});return{command:commandForDisplay(process.execPath,args),exitCode:result.status??null,stdout:options.json?trimLog(result.stdout):undefined,stderr:options.json?trimLog(result.stderr):undefined}}
@@ -350,7 +408,13 @@ function ensureDefaultProjectFiles(cwd,allowCreate=true){
       ignoreFiles:[],
       format:"json,md",
       output:DEFAULT_OUTPUT,
-      quality:{enabled:true},
+      quality:{
+        enabled:true,
+        profile:"standard",
+        dependencyGraphs:[],
+        evidenceReports:[],
+        testReports:[]
+      },
       semantic:{
         enabled:true,
         provider:"codex-cli",
@@ -805,6 +869,8 @@ function buildEquivalentCommand(command,options){
   if(base!=="doctor"){
     if(base==="run"&&options.gate)args.push("--gate",String(options.gate));
     args.push("--scope",options.scope||"changed");
+    if(options.base)args.push("--base",String(options.base));
+    if(options.head)args.push("--head",String(options.head));
     if(String(options.scope||"changed")==="paths")for(const item of options.paths||[])args.push("--path",item);
     for(const item of options.excludes||[])args.push("--exclude",item);
     for(const item of options.includes||[])args.push("--include",item);
@@ -819,6 +885,7 @@ function buildEquivalentCommand(command,options){
       args.push("--output",options.output||DEFAULT_OUTPUT);
     }
   }
+  if(["run","quality","baseline"].includes(base)&&options.quality!==false)appendLanguageAgnosticQualityOptions(args,options);
   if(options.provider)args.push("--provider",String(options.provider));
   if(options.model)args.push("--model",String(options.model));
   if(options.reasoningEffort)args.push("--reasoning-effort",String(options.reasoningEffort));
@@ -867,6 +934,12 @@ function fail(options,exitCode,code,message,fix){const payload={schemaVersion:1,
 function writeHumanOrJson(options,payload,text){if(options.json)process.stdout.write(`${JSON.stringify(payload,null,2)}\n`);else process.stdout.write(text)}
 const baseHelpFor=helpFor;
 helpFor=function(command){
+  if(["quality","run"].includes(String(command))){
+    return baseHelpFor(command).replace(
+      "\nScore scope:\n",
+      "\nQuality policy flags:\n  --profile relaxed|standard|strict\n  --policy-file <path>\n  --max-file-bytes <n> / --max-file-lines <n>\n  --max-changed-files <n> / --max-changed-lines <n>\n  --max-diff-bytes <n> / --max-binary-files <n>\n  --dependency-graph <path> (repeatable)\n  --evidence-report <path> (repeatable)\n  --test-report <junit.xml> (repeatable)\n  Use 0 to disable one numeric budget.\n\nScore scope:\n",
+    );
+  }
   if(String(command)==="semantic"){
     return baseHelpFor(command).replace(
       "  --reasoning-effort <level>\n",

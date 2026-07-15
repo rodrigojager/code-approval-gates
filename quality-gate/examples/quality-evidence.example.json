@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "metrics": {
+    "mutation.score": {
+      "value": 84.2,
+      "path": "src"
+    },
+    "complexity.cyclomatic.max": {
+      "value": 12,
+      "path": "src/core"
+    }
+  },
+  "checks": [
+    {
+      "id": "api-breaking-change",
+      "status": "passed",
+      "category": "contract-policy",
+      "message": "No breaking API change was detected."
+    }
+  ]
+}

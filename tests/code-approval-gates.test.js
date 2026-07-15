@@ -545,6 +545,8 @@ test("help text lists all public commands and baseline scope flags", () => {
 
   assert.match(qualityHelp, /code-approval-gates quality --scope changed --json --no-interactive/);
   assert.match(qualityHelp, /code-approval-gates quality --ci --scope changed[^\n]*--no-interactive/);
+  assert.match(qualityHelp, /--max-changed-lines/);
+  assert.match(qualityHelp, /--dependency-graph/);
 
   const semanticHelp = helpFor("semantic");
 
