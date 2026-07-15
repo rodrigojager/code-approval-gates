@@ -27,9 +27,9 @@
   },
   "scripts": {
     "build:image": "docker build -t code-approval-gates/quality-sidecar:latest .",
-    "test": "node --test tests/*.test.js && python -m unittest discover -s tests -p \"test_*.py\"",
+    "test": "node --test tests/*.test.js && npm run test:python",
     "test:node": "node --test tests/*.test.js",
-    "test:python": "python -m unittest discover -s tests -p \"test_*.py\""
+    "test:python": "python -m pip install --disable-pip-version-check --quiet \"defusedxml==0.7.1\" && python -m unittest discover -s tests -p \"test_*.py\""
   },
   "engines": {
     "node": ">=18"

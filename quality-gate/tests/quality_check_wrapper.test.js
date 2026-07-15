@@ -16,8 +16,24 @@ const {
   ensureDockerAvailable,
   canBuildBundledImage,
   resolveScopeFiles,
-  helpText
+  helpText,
+  runDockerWrapper,
+  writeEmptyQualityReport
 } = require("../bin/quality-check.js");
+
+function createSampleTarget(prefix = "quality-check-wrapper-") {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const target = path.join(temp, "target");
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  return target;
+}
+
+function dockerVersionResponse(attempt) {
+  return attempt >= 2
+    ? { status: 0, stdout: "28.1.1\n", stderr: "" }
+    : { status: 1, stdout: "", stderr: "Docker unavailable" };
+}
 
 test("parseArgs keeps quality gate flags for the container", () => {
   const parsed = parseArgs([
@@ -172,7 +188,8 @@ test("buildDockerArgs creates the expected sidecar invocation", () => {
   const parsed = parseArgs(["sample-project", "--threshold", "90"], {});
   const dockerArgs = buildDockerArgs(parsed, targetPath);
 
-  assert.deepEqual(dockerArgs.slice(0, 2), ["run", "--rm"]);
+  assert.deepEqual(dockerArgs.slice(0, 4), ["run", "--rm", "--user", "0"]);
+  assert.ok(dockerArgs.includes("QUALITY_CHECK_SCOPE=changed"));
   assert.ok(dockerArgs.includes(`${targetPath}:/workspace`));
   assert.ok(dockerArgs.includes(`${path.join(targetPath, ".quality", "reports")}:/workspace/.quality/reports`));
   assert.ok(dockerArgs.includes("--output"));
@@ -230,9 +247,7 @@ test("ensureDockerAvailable starts Docker and waits for readiness", () => {
   const runner = (command, args) => {
     if (command === "docker" && args[0] === "version") {
       versionChecks += 1;
-      return versionChecks >= 2
-        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
-        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+      return dockerVersionResponse(versionChecks);
     }
     return { status: 3 };
   };
@@ -247,18 +262,10 @@ test("ensureDockerAvailable starts Docker and waits for readiness", () => {
 });
 
 test("runDockerWrapper propagates docker run exit code", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget();
   const calls = [];
-  const runner = (command, args) => {
-    calls.push([command, args]);
+  const runner = (command, args, options) => {
+    calls.push([command, args, options]);
     if (args[0] === "version") {
       return { status: 0, stdout: "28.1.1\n", stderr: "" };
     }
@@ -287,15 +294,7 @@ test("runDockerWrapper propagates docker run exit code", () => {
 });
 
 test("runDockerWrapper builds bundled image when default image is missing", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget();
   const calls = [];
   const runner = (command, args) => {
     calls.push([command, args]);
@@ -321,18 +320,10 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
 });
 
 test("runDockerWrapper falls back to local sidecar when Docker is unavailable", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-local-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget("quality-check-wrapper-local-");
   const calls = [];
-  const runner = (command, args) => {
-    calls.push([command, args]);
+  const runner = (command, args, options) => {
+    calls.push([command, args, options]);
     if (command === "docker" && args[0] === "version") {
       return { status: 1, stdout: "", stderr: "Docker unavailable" };
     }
@@ -349,18 +340,11 @@ test("runDockerWrapper falls back to local sidecar when Docker is unavailable", 
   assert.ok(localCall);
   assert.ok(localCall[1].includes("--mode"));
   assert.ok(localCall[1].includes("offline"));
+  assert.equal(localCall[2].env.QUALITY_CHECK_SCOPE, "full");
 });
 
 test("runDockerWrapper starts Docker automatically before running the container", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-start-docker-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget("quality-check-wrapper-start-docker-");
   let versionChecks = 0;
   const starts = [];
   const calls = [];
@@ -368,9 +352,7 @@ test("runDockerWrapper starts Docker automatically before running the container"
     calls.push([command, args]);
     if (command === "docker" && args[0] === "version") {
       versionChecks += 1;
-      return versionChecks >= 2
-        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
-        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+      return dockerVersionResponse(versionChecks);
     }
     if (args[0] === "image") {
       return { status: 0 };
@@ -396,11 +378,6 @@ test("canBuildBundledImage validates packaged build context", () => {
 });
 
 test("writeEmptyQualityReport creates scoped approved report", () => {
-  const {
-    writeEmptyQualityReport
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-empty-report-"));
   try {
     writeEmptyQualityReport(temp, {

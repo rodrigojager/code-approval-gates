@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from types import SimpleNamespace
 
@@ -15,7 +16,16 @@ sys.path.insert(0, str(ROOT / "sidecar"))
 
 from quality_sidecar.detectors import detect_iac_files  # noqa: E402
 from quality_sidecar.policy import evaluate_policy  # noqa: E402
-from quality_sidecar.tools import run_project_tests  # noqa: E402
+from quality_sidecar.tools import (  # noqa: E402
+    ToolResult,
+    _parse_megalinter,
+    _prepare_raw_dir,
+    _run_gitleaks,
+    _run_megalinter,
+    _run_semgrep,
+    _run_trivy,
+    run_project_tests,
+)
 
 
 class QualitySidecarCliTests(unittest.TestCase):
@@ -43,15 +53,24 @@ class QualitySidecarCliTests(unittest.TestCase):
             check=False,
         )
 
+    @staticmethod
+    def write_privacy_fixture(target: Path) -> None:
+        secret = "abcdefghijkl" + "mnopqrstuvwxyz"
+        cpf = "123.456" + ".789-09"
+        (target / "sample.txt").write_text(
+            f"password = '{secret}'\ncpf = '{cpf}'\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def read_report(target: Path) -> dict[str, object]:
+        report_path = target / ".quality" / "reports" / "quality-report.json"
+        return json.loads(report_path.read_text(encoding="utf-8"))
+
     def test_quick_mode_ignores_secret_and_pii_unless_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
-            secret = "abcdefghijkl" + "mnopqrstuvwxyz"
-            cpf = "123.456" + ".789-09"
-            (target / "sample.txt").write_text(
-                f"password = '{secret}'\ncpf = '{cpf}'\n",
-                encoding="utf-8",
-            )
+            self.write_privacy_fixture(target)
 
             result = self.run_sidecar(target, "--threshold", "99")
 
@@ -61,24 +80,19 @@ class QualitySidecarCliTests(unittest.TestCase):
             self.assertTrue(report_path.exists())
             self.assertTrue(markdown_path.exists())
 
-            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report = self.read_report(target)
             self.assertEqual(report["status"], "APPROVED")
             self.assertEqual(report["findings"], [])
 
     def test_quick_mode_rejects_secret_and_pii_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
-            secret = "abcdefghijkl" + "mnopqrstuvwxyz"
-            cpf = "123.456" + ".789-09"
-            (target / "sample.txt").write_text(
-                f"password = '{secret}'\ncpf = '{cpf}'\n",
-                encoding="utf-8",
-            )
+            self.write_privacy_fixture(target)
 
             result = self.run_sidecar(target, "--threshold", "99", "--enable-secrets", "--enable-pii")
 
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            report = json.loads((target / ".quality" / "reports" / "quality-report.json").read_text(encoding="utf-8"))
+            report = self.read_report(target)
             self.assertEqual(report["status"], "REJECTED")
             categories = {finding["category"] for finding in report["findings"]}
             self.assertIn("secrets", categories)
@@ -87,12 +101,7 @@ class QualitySidecarCliTests(unittest.TestCase):
     def test_allow_flags_approve_when_all_findings_are_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
-            secret = "abcdefghijkl" + "mnopqrstuvwxyz"
-            cpf = "123.456" + ".789-09"
-            (target / "sample.txt").write_text(
-                f"password = '{secret}'\ncpf = '{cpf}'\n",
-                encoding="utf-8",
-            )
+            self.write_privacy_fixture(target)
 
             result = self.run_sidecar(
                 target,
@@ -107,7 +116,7 @@ class QualitySidecarCliTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            report = json.loads((target / ".quality" / "reports" / "quality-report.json").read_text(encoding="utf-8"))
+            report = self.read_report(target)
             self.assertEqual(report["status"], "APPROVED")
             self.assertTrue(all(finding["status"] == "allowed" for finding in report["findings"]))
 
@@ -134,7 +143,7 @@ class QualitySidecarCliTests(unittest.TestCase):
             result = self.run_sidecar(target, "--enable-coverage", "--min-line-coverage", "80")
 
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            report = json.loads((target / ".quality" / "reports" / "quality-report.json").read_text(encoding="utf-8"))
+            report = self.read_report(target)
             self.assertEqual(report["status"], "REJECTED")
             coverage = next(tool for tool in report["tools"] if tool["name"] == "coverage")
             self.assertEqual(coverage["status"], "findings")
@@ -148,7 +157,7 @@ class QualitySidecarCliTests(unittest.TestCase):
             result = self.run_sidecar(target, "--enable-coverage")
 
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-            report = json.loads((target / ".quality" / "reports" / "quality-report.json").read_text(encoding="utf-8"))
+            report = self.read_report(target)
             self.assertEqual(report["status"], "NEEDS_CHANGES")
             coverage = next(tool for tool in report["tools"] if tool["name"] == "coverage")
             self.assertEqual(coverage["status"], "missing")
@@ -172,7 +181,7 @@ class QualitySidecarCliTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            report = json.loads((target / ".quality" / "reports" / "quality-report.json").read_text(encoding="utf-8"))
+            report = self.read_report(target)
             coverage = next(tool for tool in report["tools"] if tool["name"] == "coverage")
             self.assertEqual(coverage["summary"]["lineCoverage"], 90.0)
             self.assertEqual(coverage["summary"]["branchCoverage"], 70.0)
@@ -194,6 +203,216 @@ class QualityDetectorTests(unittest.TestCase):
 
 
 class QualityPolicyTests(unittest.TestCase):
+    @staticmethod
+    def create_megalinter_error_log(temp: str, content: str) -> tuple[Path, Path]:
+        target = Path(temp)
+        raw = target / "raw"
+        logs = raw / "megalinter" / "linters_logs"
+        logs.mkdir(parents=True)
+        (logs / "YAML_YAMLLINT-ERROR.log").write_text(content, encoding="utf-8")
+        return target, raw
+
+    @staticmethod
+    def create_incomplete_npm_workspace(temp: str) -> tuple[Path, Path]:
+        target = Path(temp)
+        raw = target / "raw"
+        raw.mkdir()
+        (target / "package.json").write_text(
+            json.dumps({"workspaces": ["semantic-gate", "quality-gate"]}),
+            encoding="utf-8",
+        )
+        present_workspace = target / "quality-gate"
+        present_workspace.mkdir()
+        (present_workspace / "package.json").write_text("{}\n", encoding="utf-8")
+        return target, raw
+
+    def test_non_default_output_cleanup_preserves_project_owned_raw_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            raw = Path(temp) / "custom-output" / "raw"
+            raw.mkdir(parents=True)
+            project_owned = raw / "project-owned.txt"
+            project_owned.write_text("preservar\n", encoding="utf-8")
+
+            _prepare_raw_dir(raw)
+
+            self.assertTrue(raw.is_dir())
+            self.assertEqual(project_owned.read_text(encoding="utf-8"), "preservar\n")
+
+    def test_raw_evidence_cleanup_removes_only_known_gate_outputs_after_marking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            raw = Path(temp) / "raw"
+            _prepare_raw_dir(raw)
+            (raw / "semgrep.json").write_text("{}\n", encoding="utf-8")
+            (raw / "megalinter").mkdir()
+            (raw / "megalinter" / "result.log").write_text("stale\n", encoding="utf-8")
+            project_owned = raw / "project-owned.txt"
+            project_owned.write_text("preservar\n", encoding="utf-8")
+
+            _prepare_raw_dir(raw)
+
+            self.assertFalse((raw / "semgrep.json").exists())
+            self.assertFalse((raw / "megalinter").exists())
+            self.assertEqual(project_owned.read_text(encoding="utf-8"), "preservar\n")
+
+    def test_raw_evidence_cleanup_rejects_known_output_symlink_before_marking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+            outside = target / "outside.json"
+            outside.write_text("preservar\n", encoding="utf-8")
+            try:
+                (raw / "semgrep.json").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"Symbolic links are unavailable in this environment: {error}")
+
+            with self.assertRaisesRegex(RuntimeError, "output symlink"):
+                _prepare_raw_dir(raw)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "preservar\n")
+
+    def test_megalinter_exit_one_becomes_structured_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target, raw = self.create_megalinter_error_log(temp, "invalid YAML\n")
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(
+                    name="megalinter",
+                    status="ok",
+                    exit_code=1,
+                    output_path=str(raw / "megalinter"),
+                ),
+            ) as run_command_mock:
+                result = _run_megalinter(target, raw)
+
+            findings = _parse_megalinter(result)
+            environment = run_command_mock.call_args.kwargs["env"]
+            self.assertEqual(result.status, "findings")
+            self.assertEqual(result.summary["failedAnalyzers"], ["YAML_YAMLLINT"])
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].rule, "megalinter.yaml-yamllint")
+            self.assertEqual(findings[0].category, "lint")
+            self.assertEqual(findings[0].severity, "high")
+            policy = evaluate_policy(
+                findings,
+                [result],
+                profile="standard",
+                threshold=90,
+                mode="full",
+                fail_on_tool_error=True,
+            )
+            self.assertEqual(policy.status, "REJECTED")
+            self.assertEqual(policy.exit_code, 1)
+            self.assertIn("CSHARP_DOTNET_FORMAT", environment["ENABLE_LINTERS"])
+            self.assertNotIn("REPOSITORY_TRIVY", environment["ENABLE_LINTERS"])
+
+    def test_megalinter_fatal_analyzer_error_is_operational_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target, raw = self.create_megalinter_error_log(
+                temp,
+                "Fatal error while calling yamllint: command not found\n",
+            )
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(
+                    name="megalinter",
+                    status="ok",
+                    exit_code=1,
+                    output_path=str(raw / "megalinter"),
+                ),
+            ):
+                result = _run_megalinter(target, raw)
+
+            self.assertEqual(result.status, "error")
+            self.assertIn("YAML_YAMLLINT", result.summary["fatalAnalyzers"])
+
+    def test_trivy_skips_gate_reports_and_dependency_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / ".quality" / "reports" / "raw"
+            raw.mkdir(parents=True)
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="trivy", status="ok", exit_code=0),
+            ) as run_command_mock:
+                _run_trivy(target, raw, enable_secrets=True)
+
+            command = run_command_mock.call_args.args[1]
+            self.assertIn("vuln,misconfig,secret", command)
+            for directory in (".git", ".quality", "node_modules", "vendor"):
+                expected = str(target / directory)
+                index = command.index(expected)
+                self.assertEqual(command[index - 1], "--skip-dirs")
+
+    def test_gitleaks_redacts_secrets_in_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="gitleaks", status="ok", exit_code=0),
+            ) as run_command_mock:
+                _run_gitleaks(target, raw)
+
+            command = run_command_mock.call_args.args[1]
+            self.assertIn("--redact=100", command)
+
+    def test_semgrep_skips_gate_outputs_and_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="semgrep", status="ok", exit_code=0),
+            ) as run_command_mock:
+                _run_semgrep(target, raw)
+
+            command = run_command_mock.call_args.args[1]
+            for directory in (".git", ".quality", "node_modules"):
+                index = command.index(directory)
+                self.assertEqual(command[index - 1], "--exclude")
+
+    def test_project_tests_skip_when_scoped_checkout_omits_npm_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target, raw = self.create_incomplete_npm_workspace(temp)
+
+            with (
+                patch.dict(os.environ, {"QUALITY_CHECK_SCOPE": "changed"}),
+                patch("quality_sidecar.tools.shutil.which", return_value="npm"),
+                patch("quality_sidecar.tools.run_command") as run_command_mock,
+            ):
+                result, findings = run_project_tests(target, raw)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "skipped")
+            self.assertEqual(result.summary["missingWorkspaces"], ["semantic-gate"])
+            self.assertEqual(findings, [])
+            run_command_mock.assert_not_called()
+
+    def test_project_tests_error_when_full_checkout_omits_npm_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target, raw = self.create_incomplete_npm_workspace(temp)
+
+            with (
+                patch.dict(os.environ, {"QUALITY_CHECK_SCOPE": "full"}),
+                patch("quality_sidecar.tools.shutil.which", return_value="npm"),
+                patch("quality_sidecar.tools.run_command") as run_command_mock,
+            ):
+                result, findings = run_project_tests(target, raw)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "error")
+            self.assertEqual(result.summary["missingWorkspaces"], ["semantic-gate"])
+            self.assertEqual(findings, [])
+            run_command_mock.assert_not_called()
+
     def test_full_mode_tool_error_uses_needs_changes_status(self) -> None:
         result = evaluate_policy(
             [],
