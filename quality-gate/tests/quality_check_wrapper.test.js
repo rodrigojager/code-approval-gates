@@ -244,6 +244,18 @@ test("resolveGitRange prefers GitLab's exact merge request diff base SHA", () =>
   assert.deepEqual(resolveGitRange(parsed), { base: "abc123", head: "def456" });
 });
 
+test("resolveGitRange uses explicit GitHub pull request refs", () => {
+  const parsed = parseArgs([".", "--scope", "changed"], {
+    GITHUB_BASE_REF: "main",
+    GITHUB_SHA: "0123456789abcdef"
+  });
+
+  assert.deepEqual(resolveGitRange(parsed), {
+    base: "origin/main",
+    head: "0123456789abcdef"
+  });
+});
+
 test("resolveGitRange rejects option-like, empty, and control-character refs before Git runs", () => {
   for (const args of [["--base=-c"], ["--base="], ["--head=bad\nref"]]) {
     assert.throws(

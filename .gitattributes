@@ -11,3 +11,4 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 Dockerfile text eol=lf
+quality-gate/docker/quality-ci text eol=lf

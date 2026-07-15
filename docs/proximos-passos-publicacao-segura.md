@@ -7,11 +7,16 @@ Este checklist começa quando a branch `final` estiver revisada. Ele não conté
 - `final` publicada no GitHub para revisão;
 - PR de `final` para `main` com checks obrigatórios;
 - unit tests, clean-clone verify, build das flavors `generic` e `dotnetweb`, full smoke e scan da imagem aprovados;
+- base MegaLinter v9.5.0/Alpine 3.23 fixada por digest; upgrade bloqueado até release corrigida do Semgrep e nova validação completa;
+- `PATH` root-owned/toolchains e execução non-root validados nas duas flavors;
+- flavor `generic` validada com 20 analisadores MegaLinter + 8 ferramentas: `TERRAFORM_TERRASCAN` desabilitado no MegaLinter e Terrascan v1.19.9 dedicado, em project mode, sobre projeção temporária Terraform com anchors somente-comentário nos ancestrais necessários e falha fechada para `scan_errors`;
+- risco de manutenção registrado: o [repositório oficial do Terrascan foi arquivado em 20/11/2025](https://github.com/tenable/terrascan); manter v1.19.9 nesta entrega evita regressão, mas um substituto mantido deve ser avaliado em shadow mode antes de qualquer troca;
+- workflow implementado para promover exatamente o manifesto/digest validado, sem rebuild no job de publicação, ainda não exercitado por tag real;
 - Gitleaks aprovado no histórico e na árvore atual com redaction;
 - branch `main` e tags `quality-v*` protegidas;
 - nenhum package/tag criado a partir de commit fora de `main`.
 
-Não crie uma tag apenas para testar se o workflow funciona. Pull Requests validam o build sem conceder `packages: write`; a publicação ocorre somente depois do merge.
+Não crie uma tag apenas para testar se o workflow funciona. Pushes e Pull Requests fazem build e smokes read-only, sem conceder `packages: write`; candidate e publicação existem somente no fluxo futuro de tag, depois do merge e das proteções exigidas.
 
 ## Credenciais
 
@@ -66,6 +71,17 @@ Mantenha Secret scanning e Push protection habilitados.
 
 Depois do merge e de atualizar `main` por fast-forward:
 
+> **Estado atual:** a promoção pelo mesmo digest está implementada, mas nunca foi exercitada por uma tag real. Não crie a tag nesta etapa. Antes do primeiro release, conclua revisão/merge/proteções e confirme que não há vulnerabilidade `CRITICAL` corrigível: o job `release-candidate` bloqueia qualquer `CRITICAL` corrigível e envia o report Trivy como artifact. A base deve permanecer em MegaLinter v9.5.0/Alpine 3.23 até uma release do Semgrep incorporar a correção OCaml/musl registrada em [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933) e [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21), seguida de nova matriz completa das duas flavors.
+
+> **Bloqueador confirmado em 2026-07-15:** o scan local tem zero `CRITICAL` corrigível nos pacotes Alpine, mas ainda registra 13 ocorrências em toolchains/bibliotecas da imagem `dotnetweb` (18 na `generic`), incluindo componentes herdados Node, Go e .NET. A futura tag deve falhar até a remediação e uma nova varredura completa chegar a zero. Não afrouxe esse controle para publicar.
+
+Quando todos os pré-requisitos externos estiverem atendidos, a tag acionará este fluxo:
+
+1. `release-candidate` constrói a imagem e envia uma referência privada `validation-*`;
+2. o digest retornado pelo build é baixado e recebe novamente todos os smokes e o scan Trivy completo;
+3. o relatório Trivy é preservado como artifact e qualquer `CRITICAL` corrigível interrompe o release;
+4. `publish` usa `docker buildx imagetools create` para promover exatamente esse digest às tags finais, sem novo build.
+
 ```powershell
 git switch main
 git pull --ff-only origin main
@@ -83,6 +99,8 @@ ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
 
 Também será produzida uma tag `sha-<commit>-dotnetweb`. Não use a tag ambígua `0.2.0` e não publique/use `latest`.
 
+As referências intermediárias `validation-*` e `promotion-*` não são tags finais de consumo, mas permanecem no registry para permitir validação e promoção. Defina uma política de retenção/limpeza para o package privado antes da operação contínua e nunca remova uma referência usada por um workflow em andamento.
+
 ## Inspeção do package
 
 Mantenha a primeira publicação privada e confira:
@@ -98,6 +116,8 @@ Mantenha a primeira publicação privada e confira:
 - versões dos scanners e `pip check`.
 
 Uma imagem privada não é lugar seguro para secrets. Qualquer usuário com pull pode inspecionar todas as layers. Tornar o package público é irreversível; faça isso somente após revisão explícita.
+
+Terrascan v1.19.9 está pinado, mas os metadados de `registry.terraform.io` continuam um input mutável/network-required, assim como regras e bancos dos demais scanners. O relatório distingue o bundle pinado desse input de runtime não pinado. Antes do GitLab, teste allowlist de egress e cache persistente gravável pelo UID `10001`; não armazene token de registry no cache, na imagem, no checkout ou em artifacts.
 
 ## Pull privado no runner
 
@@ -132,7 +152,7 @@ Registre também o digest anterior aprovado. O rollback altera essa variável pa
 5. Rode CI Lint na instância real e valide UID `10001`, timeout e ownership.
 6. Execute três MRs com `CODE_APPROVAL_QUALITY_BLOCKING=false`.
 7. Inspecione logs e apenas os artifacts JSON/Markdown/manifesto.
-8. Calibre rede, recursos, policy, linters, suppressions, C#/MSBuild e falsos positivos.
+8. Calibre rede, cache, recursos, policy, linters, suppressions, C#/MSBuild e falsos positivos; confirme egress para Terrascan/Terraform Registry sem expor credenciais ao MR.
 9. Antes de bloquear, torne o job obrigatório por Pipeline Execution Policy/compliance CI e confirme `Pipelines must succeed`.
 
 Detalhes de runner, política, evidências, proxy/CA e rollback estão em `docs/plano-gitlab-quality-gate.md`. A versão inglesa está em `docs/gitlab-quality-gate.en.md`.
@@ -157,12 +177,21 @@ Se token aparecer em commit, PR, issue, artifact, screenshot ou log:
 - [ ] Tag criada a partir do `main` aprovado.
 - [ ] Package privado inspecionado.
 - [ ] Flavor `dotnetweb` e arquitetura confirmadas.
+- [ ] Base MegaLinter v9.5.0/Alpine 3.23 e seus digests conferidos.
+- [ ] Upgrade da base condicionado a release corrigida do Semgrep e nova matriz completa.
+- [x] Workflow implementa promoção do digest exato validado, sem rebuild divergente.
+- [ ] Uma tag real comprovou candidate, report Trivy e promoção do mesmo digest.
+- [ ] Scan Trivy completo chegou a zero `CRITICAL` corrigível em toolchains e bibliotecas.
+- [ ] Retenção/limpeza das referências privadas `validation-*` e `promotion-*` foi definida.
 - [ ] SBOM, proveniência e digest registrados.
 - [ ] Pull privado usa conta técnica `read:packages`, se necessário.
 - [ ] GitLab fixa a imagem por digest.
 - [ ] Política e SHA ficam fora do MR.
 - [ ] Target branch/ref remoto e timeout são governados centralmente.
 - [ ] Runtime non-root UID `10001` validado no runner real.
+- [ ] `generic` confirmou 20 analisadores MegaLinter + 8 ferramentas, com Terrascan v1.19.9 dedicado em project mode sobre projeção somente Terraform.
+- [ ] Egress/cache de Terrascan e Terraform Registry testados sem credenciais no checkout, imagem ou artifacts.
+- [ ] Substituto mantido para o Terrascan arquivado avaliado em shadow mode; remoção condicionada à paridade cross-file/evidência/fail-closed.
 - [ ] CI Lint e três MRs não bloqueantes concluídos.
 - [ ] Linters/suppressions e C#/MSBuild inventariados antes de blocking.
 - [ ] Pipeline Execution Policy/compliance CI impede remoção do gate pelo MR.

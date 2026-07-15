@@ -5,9 +5,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 import defusedxml.ElementTree as ET
@@ -185,6 +186,22 @@ def _subprocess_environment(overrides: dict[str, str] | None, *, inherit: bool) 
     return environment
 
 
+def _terraform_file_lists(iac_files: list[str]) -> tuple[list[str], list[str]]:
+    """Return Terraform entrypoints and the complete safe projection list."""
+
+    primary: list[str] = []
+    projection: list[str] = []
+    for value in iac_files:
+        name = PurePosixPath(value.replace("\\", "/")).name.lower()
+        is_primary = name.endswith((".tf", ".tf.json"))
+        is_auxiliary = name.endswith((".tfvars", ".tfvars.json")) or name == ".terraform.lock.hcl"
+        if is_primary:
+            primary.append(value)
+        if is_primary or is_auxiliary:
+            projection.append(value)
+    return sorted(set(primary)), sorted(set(projection))
+
+
 def run_external_tools(
     root: Path,
     reports_dir: Path,
@@ -202,6 +219,8 @@ def run_external_tools(
     results: list[ToolResult] = []
     findings: list[Finding] = []
     iac_files = detect_iac_files(root)
+    terraform_primary_files, terraform_projection_files = _terraform_file_lists(iac_files)
+    flavor = _quality_gate_flavor()
 
     tool_specs = [
         ("megalinter", lambda current_root, current_raw: _run_megalinter(current_root, current_raw)),
@@ -235,6 +254,35 @@ def run_external_tools(
         ("osv-scanner", lambda current_root, current_raw: _run_osv_scanner(current_root, current_raw)),
         ("jscpd", lambda current_root, current_raw: _run_jscpd(current_root, current_raw)),
     ]
+    if flavor == "generic":
+        # Terrascan's MegaLinter project adapter recursively inspects every
+        # directory, including bin/obj generated concurrently by C# linters.
+        # Run it as a first-class tool against a Terraform-only projection so
+        # project/cross-file rules remain intact without hiding legitimate
+        # source directories from the other language analyzers.
+        tool_specs.insert(
+            0,
+            (
+                "terrascan",
+                lambda current_root, current_raw: _run_terrascan(
+                    current_root,
+                    current_raw,
+                    terraform_primary_files,
+                    terraform_projection_files,
+                )
+                if enable_iac and terraform_primary_files
+                else ToolResult(
+                    name="terrascan",
+                    status="skipped",
+                    summary={
+                        "reason": "IaC scanning disabled by --disable-iac."
+                        if not enable_iac
+                        else "No Terraform configuration files detected.",
+                        "iacFiles": len(terraform_primary_files),
+                    },
+                ),
+            ),
+        )
 
     for name, runner in tool_specs:
         result = runner(root, raw_dir)
@@ -260,6 +308,7 @@ RAW_EVIDENCE_FILES = {
     "gitleaks.json",
     "osv-scanner.json",
     "semgrep.json",
+    "terrascan.json",
     "trivy.json",
     *{
         f"{tool}.{stream}.log"
@@ -271,6 +320,7 @@ RAW_EVIDENCE_FILES = {
             "osv-scanner",
             "project-tests",
             "semgrep",
+            "terrascan",
             "trivy",
         )
         for stream in ("stdout", "stderr")
@@ -334,6 +384,7 @@ MEGALINTER_GENERIC_DUPLICATE_LINTERS = ",".join(
         "REPOSITORY_OSV_SCANNER",
         "REPOSITORY_SEMGREP",
         "REPOSITORY_TRIVY",
+        "TERRAFORM_TERRASCAN",
     ]
 )
 
@@ -381,6 +432,10 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         "APPLY_FIXES": "none",
         "PRINT_ALL_FILES": "false",
         "SHOW_ELAPSED_TIME": "true",
+        # MegaLinter otherwise treats formatter failures as warnings. The
+        # quality gate must reject unformatted code instead of silently
+        # approving it as a successful analyzer run.
+        "FORMATTERS_DISABLE_ERRORS": "false",
         "FILTER_REGEX_EXCLUDE": _megalinter_exclude_regex(root),
         "MEGALINTER_CONFIG": MEGALINTER_TRUSTED_CONFIG,
         # MegaLinter's activation probe prepends the workspace even when a
@@ -605,6 +660,186 @@ def _copy_stdout_to_output(result: ToolResult, output: Path) -> None:
     stdout_path = Path(result.stdout_path) if result.stdout_path else None
     if stdout_path and stdout_path.exists():
         output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+
+def _safe_projection_path(value: str) -> Path:
+    normalized = value.replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    if (
+        not normalized
+        or relative.is_absolute()
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError(f"Unsafe Terraform projection path: {value!r}")
+    return Path(*relative.parts)
+
+
+def _copy_terraform_projection(root: Path, destination: Path, files: list[str]) -> set[str]:
+    root_resolved = root.resolve(strict=True)
+    copied: set[str] = set()
+    for value in files:
+        relative = _safe_projection_path(value)
+        source = root / relative
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"Terraform projection source traverses a symbolic link: {value}")
+        if not source.is_file():
+            raise ValueError(f"Terraform projection source is not a regular file: {value}")
+        try:
+            source.resolve(strict=True).relative_to(root_resolved)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Terraform projection source escapes the analysis root: {value}") from error
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target, follow_symlinks=False)
+        copied.add(relative.as_posix())
+    return copied
+
+
+def _add_terraform_projection_anchors(
+    destination: Path,
+    primary_files: list[str],
+    projection_files: list[str],
+) -> list[str]:
+    """Keep Terrascan project traversal valid when Terraform starts below the root.
+
+    Terrascan 1.19.9 reports scan_errors for every traversed ancestor that has
+    no Terraform file of its own. Comment-only anchors make those directories
+    valid without changing the analyzed resources or exposing non-IaC files.
+    """
+
+    directories_with_config: set[Path] = set()
+    traversed_directories: set[Path] = {Path()}
+    for value in primary_files:
+        relative = _safe_projection_path(value)
+        directories_with_config.add(relative.parent)
+    for value in projection_files:
+        relative = _safe_projection_path(value)
+        current = Path()
+        for part in relative.parent.parts:
+            current = current / part
+            traversed_directories.add(current)
+
+    anchors: list[str] = []
+    for directory in sorted(traversed_directories - directories_with_config, key=lambda item: item.as_posix()):
+        suffix = 0
+        while True:
+            name = "quality_gate_projection_anchor.tf" if suffix == 0 else f"quality_gate_projection_anchor_{suffix}.tf"
+            anchor = destination / directory / name
+            if not anchor.exists():
+                break
+            suffix += 1
+        anchor.write_text("# Trusted projection anchor for Terrascan directory traversal.\n", encoding="utf-8")
+        anchors.append((directory / name).as_posix())
+    return anchors
+
+
+def _sanitize_terrascan_evidence(payload: Any, projection: Path, allowed_files: set[str]) -> dict[str, Any]:
+    _validate_tool_payload("terrascan", payload)
+    results = payload["results"]
+    summary = results["scan_summary"]
+    scan_target = summary.get("file/folder")
+    try:
+        if not isinstance(scan_target, str) or Path(scan_target).resolve(strict=True) != projection.resolve(strict=True):
+            raise ValueError("Terrascan report target does not match the trusted projection")
+    except OSError as error:
+        raise ValueError("Terrascan report target could not be resolved") from error
+
+    for collection_name in ("violations", "skipped_violations"):
+        for item in results.get(collection_name) or []:
+            file_value = item.get("file")
+            if not isinstance(file_value, str) or not file_value:
+                raise ValueError("Terrascan reported a finding without a trusted file path")
+            normalized = _safe_projection_path(str(file_value)).as_posix()
+            if normalized not in allowed_files:
+                raise ValueError(f"Terrascan reported a file outside the trusted projection: {file_value}")
+            item["file"] = normalized
+    summary["file/folder"] = "."
+    return payload
+
+
+def _run_terrascan(
+    root: Path,
+    raw_dir: Path,
+    primary_files: list[str],
+    projection_files: list[str],
+) -> ToolResult:
+    output = raw_dir / "terrascan.json"
+    try:
+        with tempfile.TemporaryDirectory(prefix="code-approval-terrascan-") as temporary:
+            projection = Path(temporary)
+            allowed_files = _copy_terraform_projection(root, projection, projection_files)
+            anchors = _add_terraform_projection_anchors(projection, primary_files, projection_files)
+            result = run_command(
+                "terrascan",
+                [
+                    "terrascan",
+                    "scan",
+                    "--iac-type",
+                    "terraform",
+                    "--iac-dir",
+                    str(projection),
+                    "--output",
+                    "json",
+                ],
+                raw_dir,
+                cwd=MEGALINTER_CONFIG_DIR,
+                acceptable_exit_codes={0, 3},
+                output_path=output,
+            )
+            _copy_stdout_to_output(result, output)
+            if result.status not in {"missing", "timeout", "error"}:
+                payload, evidence_error = _load_json_evidence(str(output))
+                if evidence_error is not None:
+                    result.status = "error"
+                    result.error = f"Invalid analyzer evidence: {evidence_error}."
+                    result.summary["evidenceValid"] = False
+                else:
+                    try:
+                        sanitized = _sanitize_terrascan_evidence(payload, projection, allowed_files)
+                        output.write_text(
+                            json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")) + "\n",
+                            encoding="utf-8",
+                        )
+                    except (TypeError, ValueError) as error:
+                        result.status = "error"
+                        result.error = f"Invalid analyzer evidence: {error}."
+                        result.summary["evidenceValid"] = False
+    except (OSError, ValueError) as error:
+        return ToolResult(
+            name="terrascan",
+            status="error",
+            output_path=str(output),
+            error=f"Unable to build trusted Terraform projection: {error}",
+            summary={"evidenceValid": False},
+        )
+
+    result.summary.update(
+        {
+            "analysisInput": {
+                "kind": "built-in-policy-bundle",
+                "source": "terrascan@1.19.9",
+                "pinned": True,
+                "networkRequired": False,
+            },
+            "runtimeInputs": [
+                {
+                    "kind": "terraform-registry-metadata",
+                    "source": "registry.terraform.io",
+                    "pinned": False,
+                    "networkRequired": True,
+                }
+            ],
+            "iacFiles": len(primary_files),
+            "iacFileSamples": primary_files[:20],
+            "projectionFiles": len(projection_files),
+            "projectionAnchors": len(anchors),
+        }
+    )
+    return result
 
 
 def _run_checkov(root: Path, raw_dir: Path, iac_files: list[str]) -> ToolResult:
@@ -1152,6 +1387,32 @@ def _validate_tool_payload(name: str, payload: Any) -> None:
     elif name == "trivy":
         if not isinstance(payload, dict) or not isinstance(payload.get("Results"), list):
             raise ValueError("Trivy report needs a Results array")
+    elif name == "terrascan":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), dict):
+            raise ValueError("Terrascan report needs a results object")
+        results = payload["results"]
+        summary = results.get("scan_summary")
+        violations = results.get("violations")
+        skipped = results.get("skipped_violations")
+        scan_errors = results.get("scan_errors")
+        counters = ("policies_validated", "violated_policies", "low", "medium", "high")
+        if (
+            not isinstance(summary, dict)
+            or not all(
+                isinstance(summary.get(counter), int)
+                and not isinstance(summary.get(counter), bool)
+                and summary[counter] >= 0
+                for counter in counters
+            )
+            or violations is not None
+            and (not isinstance(violations, list) or not all(isinstance(item, dict) for item in violations))
+            or skipped is not None
+            and (not isinstance(skipped, list) or not all(isinstance(item, dict) for item in skipped))
+            or scan_errors is not None
+            and (not isinstance(scan_errors, list) or bool(scan_errors))
+            or (summary["violated_policies"] == 0) != (not violations)
+        ):
+            raise ValueError("Terrascan report has an invalid summary or violation list")
     elif name == "checkov":
         documents = payload if isinstance(payload, list) else [payload]
         if not documents or not all(
@@ -1199,6 +1460,7 @@ def parse_tool_findings(name: str, result: ToolResult, root: Path) -> list[Findi
     parsers = {
         "semgrep": _parse_semgrep,
         "gitleaks": _parse_gitleaks,
+        "terrascan": _parse_terrascan,
         "trivy": _parse_trivy,
         "checkov": _parse_checkov,
         "osv-scanner": _parse_osv,
@@ -1291,6 +1553,48 @@ def _parse_gitleaks(payload: Any, root: Path) -> list[Finding]:
                 message=item.get("Description") or "Secret detected by Gitleaks.",
                 fingerprint=item.get("Fingerprint", ""),
                 metadata={"commit": item.get("Commit")},
+            )
+        )
+    return findings
+
+
+def _parse_terrascan(payload: Any, root: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    results = (payload or {}).get("results", {})
+    for item in results.get("violations") or []:
+        findings.append(
+            Finding(
+                tool="terrascan",
+                rule=item.get("rule_id") or item.get("rule_name") or "terrascan.iac",
+                severity=item.get("severity") or "high",
+                category="iac",
+                path=_normalize_path(item.get("file"), root),
+                line=item.get("line") if isinstance(item.get("line"), int) else None,
+                message=item.get("description") or "Infrastructure-as-code issue detected by Terrascan.",
+                metadata={
+                    "ruleName": item.get("rule_name"),
+                    "policyCategory": item.get("category"),
+                    "resource": item.get("resource_name"),
+                    "resourceType": item.get("resource_type"),
+                    "module": item.get("module_name"),
+                },
+            )
+        )
+    for item in results.get("skipped_violations") or []:
+        findings.append(
+            Finding(
+                tool="terrascan",
+                rule=item.get("rule_id") or item.get("rule_name") or "terrascan.suppression",
+                severity="high",
+                category="policy-suppression",
+                path=_normalize_path(item.get("file"), root),
+                line=item.get("line") if isinstance(item.get("line"), int) else None,
+                message="Project-controlled Terrascan suppression is not trusted.",
+                metadata={
+                    "ruleName": item.get("rule_name"),
+                    "resource": item.get("resource_name"),
+                    "suppressedByProject": True,
+                },
             )
         )
     return findings

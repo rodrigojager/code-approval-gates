@@ -16,6 +16,10 @@ immutable Git commit projection ---------------+-> advisory Quality Gate
 
 - No Docker-in-Docker, privileged runner, Docker socket, or Compose.
 - The image runs as UID/GID `10001`, not root.
+- The launcher rebuilds a fixed `PATH` from root-owned toolchain directories; it does not inherit job/MR `PATH` or command overrides, and scanners remain non-root.
+- In the `generic` flavor, `TERRAFORM_TERRASCAN` is disabled inside MegaLinter. The runtime runs Terrascan v1.19.9 separately in project mode over a temporary projection of the selected Terraform files. Comment-only synthetic anchors make ancestor directories without their own configuration valid; any non-empty `scan_errors` fails closed. This preserves cross-file rules and nested layouts without ignoring legitimate directories named `bin` or `obj`.
+
+> **Maintenance risk:** the [official Terrascan repository was archived on November 20, 2025](https://github.com/tenable/terrascan). Version 1.19.9 remains pinned in this first delivery to preserve coverage. Evaluate a maintained replacement in shadow mode and remove Terrascan only after proving parity for cross-file rules, evidence format, and fail-closed behavior.
 - Semantic Gate is not installed or used by this pilot.
 - `quality-ci` never deliberately invokes project build/test scripts. Analyzers may still invoke toolchains or evaluate MR-controlled config/MSBuild, which is why the pilot remains non-root and advisory.
 - The initial boundary does not accept JUnit, coverage, evidence, or dependency paths from job/MR variables. GitLab and Sonar retain those signals until mappings are root-owned or policy-governed.
@@ -36,7 +40,8 @@ Confirm:
 - dedicated `linux/amd64` Docker executor locked to authorized projects/groups;
 - `privileged = false` and no `/var/run/docker.sock` mount;
 - UID `10001` can write the checkout's `.quality/reports`;
-- controlled egress to GHCR and required scanner data sources;
+- controlled egress to GHCR and required scanner data sources, including Terrascan and Terraform Registry;
+- scanner/registry cache writable by UID `10001`, without sharing credentials with the checkout or MR-controlled code;
 - centrally governed timeout (the example starts at `2h`);
 - sufficient CPU and memory for the measured pilot.
 
@@ -60,6 +65,19 @@ The first .NET flavor is located by:
 ```text
 ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
 ```
+
+The base is temporarily pinned by digest to MegaLinter v9.5.0/Alpine 3.23. MegaLinter v9.6/Alpine 3.24 with musl 1.2.6 triggered `Failed to allocate signal stack for domain 0` in Semgrep on affected Intel CPUs, related to [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933), with the fix merged in [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Upgrade only after a Semgrep release contains the fix and both flavors pass build, quick smoke, and full-image smokes again in CI.
+
+The workflow now implements promotion without a divergent rebuild, but this path has not been exercised by a real tag and no tag/release should be created at this stage:
+
+1. on pushes and pull requests, the `validate` matrix builds and runs smokes read-only, without logging in or writing to GHCR;
+2. on a future `quality-v*` tag, `release-candidate` builds and pushes an intermediate `validation-*` tag, captures the produced digest, pulls that exact digest, and repeats the smokes;
+3. the same candidate runs the full Trivy scan, blocks every fixed `CRITICAL` vulnerability, and uploads the report as an audit artifact;
+4. only after that validation, `publish` promotes the same digest to final tags with `docker buildx imagetools create`; the job does not rebuild the image.
+
+Intermediate `validation-*` and `promotion-*` tags remain an operational risk. Keep the package private and define retention/cleanup before operating releases continuously; do not delete a reference required by an in-progress run.
+
+The 2026-07-15 local full scan found zero fixed `CRITICAL` vulnerabilities in Alpine packages, but 13 occurrences in the `dotnetweb` flavor's embedded toolchains/libraries (and 18 in `generic`). They include inherited Node, Go, and .NET components. This does not invalidate the functional smokes or local pilot, but it **correctly blocks the first versioned tag/image**: remediate and repeat the full scan until it reaches zero; do not weaken `release-candidate` policy to bypass the result.
 
 Run the final GitLab job by immutable digest:
 
@@ -146,7 +164,7 @@ It must be exactly `root:root` mode `0444` so UID `10001` can read it. It accept
 
 The transport must contain no secret. Proxy URLs with userinfo or `@` are rejected because MR analyzers could read/exfiltrate credentials. Public CA files must be root-owned under `/etc/code-approval/ca`, `/etc/ssl`, or `/usr/local/share/ca-certificates`; never mount a private key.
 
-Executables are pinned, but the `semgrep --config=p/default` ruleset, Trivy databases, and OSV data remain mutable network inputs. Reports mark these as unpinned/network-required. Do not claim fully reproducible or offline analysis.
+Executables are pinned — including Terrascan v1.19.9 — but the `semgrep --config=p/default` ruleset, Trivy databases, OSV data, and Terraform Registry metadata remain mutable network inputs. Reports record the pinned Terrascan bundle separately from `registry.terraform.io`, which is unpinned/network-required. Allow only required destinations and plan a persistent cache writable by UID `10001` to reduce variability and outages; do not place registry tokens in that cache. Do not claim fully reproducible or offline analysis.
 
 ## 8. Pilot and rollback
 
@@ -167,12 +185,20 @@ Enable central blocking only after real full-image smoke, analyzer/MSBuild harde
 
 - [ ] Dedicated `linux/amd64`, UID `10001`, unprivileged runner without socket.
 - [ ] `dotnetweb` image published, inspected, and pinned by digest.
+- [ ] MegaLinter v9.5.0/Alpine 3.23 base confirmed by digest; any upgrade reran the complete matrix.
+- [x] The workflow promotes the exact validated digest without a publication-job rebuild.
+- [ ] The full scan reached zero fixed `CRITICAL` toolchain/library findings (local state: 13 in `dotnetweb`).
+- [ ] A real tag demonstrated candidate validation, the Trivy report artifact, and promotion of the same digest.
+- [ ] Retention/cleanup is defined for private `validation-*` and `promotion-*` tags.
 - [ ] External `schemaVersion: 1` policy and digest governed outside MR YAML.
 - [ ] Target branch governed and `refs/remotes/origin/<target>` available.
 - [ ] Mandatory execution policy/compliance path ready before blocking.
 - [ ] Optional transport root-owned `0444`, CA-only, no proxy credential.
 - [ ] CI Lint passes with the real corporate Sonar include.
 - [ ] Full image smoke and required scanners validated.
+- [ ] The `generic` flavor confirmed 20 MegaLinter analyzers + 8 tools; dedicated Terrascan v1.19.9 runs in project mode over a Terraform-only projection.
+- [ ] Egress and caching for Terrascan/Terraform Registry were tested without exposing credentials to the MR.
+- [ ] A maintained replacement for archived Terrascan is being evaluated in shadow mode, with no switch before proven parity.
 - [ ] Analyzer configs, suppressions, and C#/MSBuild behavior inventoried.
 - [ ] Three advisory MRs completed and resources calibrated.
 - [ ] Previous digest recorded for rollback.

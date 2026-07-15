@@ -14,6 +14,21 @@ const {
 } = require("../bin/code-approval-gates.js");
 
 const CLI = path.resolve(__dirname, "..", "bin", "code-approval-gates.js");
+const LOCAL_SIDECAR_ENV = {
+  ...process.env,
+  // These tests verify the bundled local sidecar. A CI host may already have
+  // Docker, which would otherwise build/run the image and make the fixtures
+  // depend on daemon availability and container-created file ownership.
+  DOCKER_CONTEXT: "",
+  DOCKER_HOST: "tcp://127.0.0.1:1",
+  GITHUB_BASE_REF: "",
+  GITHUB_HEAD_REF: "",
+  GITHUB_SHA: "",
+  GITLAB_CI: "",
+  CI_MERGE_REQUEST_DIFF_BASE_SHA: "",
+  CI_MERGE_REQUEST_TARGET_BRANCH_NAME: "",
+  CI_COMMIT_SHA: ""
+};
 
 test("unified CLI parses language-agnostic evidence flags", () => {
   const parsed = parseArgs([
@@ -108,7 +123,7 @@ test("unified CLI treats a quality rejection as a gate decision, not an operatio
       "--output", ".quality/reports/rejected",
       "--json",
       "--no-interactive"
-    ], { cwd: root, encoding: "utf8" });
+    ], { cwd: root, encoding: "utf8", env: LOCAL_SIDECAR_ENV });
 
     assert.equal(result.status, 1, result.stderr);
     const summary = JSON.parse(result.stdout);
@@ -158,7 +173,7 @@ test("GitLab merge request range preserves diff budgets and report artifacts", (
       cwd: root,
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...LOCAL_SIDECAR_ENV,
         CI: "true",
         GITLAB_CI: "true",
         CI_MERGE_REQUEST_DIFF_BASE_SHA: base,
@@ -220,7 +235,7 @@ test("policy-declared neutral evidence works end to end in an ignored directory"
       "--output", ".quality/reports/policy-e2e",
       "--json",
       "--no-interactive"
-    ], { cwd: root, encoding: "utf8" });
+    ], { cwd: root, encoding: "utf8", env: LOCAL_SIDECAR_ENV });
 
     assert.equal(result.status, 1, result.stderr);
     const summary = JSON.parse(result.stdout);
@@ -261,7 +276,7 @@ test("deletion-only changes still run diff budgets", () => {
       "--output", ".quality/reports/deletion",
       "--json",
       "--no-interactive"
-    ], { cwd: root, encoding: "utf8" });
+    ], { cwd: root, encoding: "utf8", env: LOCAL_SIDECAR_ENV });
 
     assert.equal(result.status, 1, result.stderr);
     const summary = JSON.parse(result.stdout);

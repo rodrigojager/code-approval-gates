@@ -182,7 +182,7 @@ def is_iac_file(path: Path, root: Path) -> bool:
     name = path.name
     suffix = path.suffix.lower()
 
-    if name in IAC_FILE_NAMES or suffix in IAC_SUFFIXES:
+    if name in IAC_FILE_NAMES or suffix in IAC_SUFFIXES or name.lower().endswith((".tf.json", ".tfvars.json")):
         return True
     if len(parts) >= 3 and parts[0] == ".github" and parts[1] == "workflows" and suffix in {".yaml", ".yml"}:
         return True

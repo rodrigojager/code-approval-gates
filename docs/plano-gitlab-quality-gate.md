@@ -17,6 +17,10 @@ checkout Git imutável --------------------------+-> Quality Gate advisory
 - O Runner usa Docker apenas para iniciar o container do job.
 - Não há Docker-in-Docker, `privileged`, socket Docker ou Compose.
 - O container executa como UID/GID `10001`, não como root.
+- O launcher recompõe um `PATH` fixo com diretórios root-owned das toolchains; não herda `PATH` nem command overrides do job/MR, e os scanners continuam non-root.
+- Na flavor `generic`, `TERRAFORM_TERRASCAN` fica desabilitado dentro do MegaLinter. O runtime executa Terrascan v1.19.9 separadamente, em project mode, sobre uma projeção temporária dos arquivos Terraform selecionados. Anchors sintéticos somente-comentário tornam válidos os diretórios ancestrais sem configuração própria; `scan_errors` não vazio falha fechado. Assim, regras cross-file e layouts aninhados são preservados sem ignorar diretórios legítimos chamados `bin` ou `obj`.
+
+> **Risco de sustentação:** o [repositório oficial do Terrascan foi arquivado em 20/11/2025](https://github.com/tenable/terrascan). A v1.19.9 permanece pinada nesta primeira entrega para não perder cobertura. Avalie um substituto mantido em shadow mode e só remova o Terrascan depois de comprovar paridade de regras cross-file, formato de evidência e comportamento fail-closed.
 - O Semantic Gate fica fora dessa imagem e desse piloto.
 - O `quality-ci` não chama deliberadamente testes/build/scripts do projeto. Porém analisadores podem invocar toolchains e avaliar configs/MSBuild controlados pelo MR; por isso o piloto continua non-root e advisory.
 - No contrato inicial ele também não consome JUnit, cobertura ou evidence por paths fornecidos pelo job. Esses sinais continuam no GitLab/Sonar até existir uma fonte root-owned ou policy-governed para os mappings.
@@ -41,7 +45,8 @@ Confirme no ambiente real:
 - `privileged = false`;
 - nenhum `/var/run/docker.sock` montado;
 - escrita do UID `10001` no checkout e em `.quality/reports`;
-- egress controlado para GHCR e para os bancos/regras usados pelos scanners;
+- egress controlado para GHCR e para os bancos/regras usados pelos scanners, incluindo Terrascan e Terraform Registry;
+- cache de scanner/registry gravável pelo UID `10001`, sem compartilhar credenciais com o checkout ou com código do MR;
 - memória e CPU suficientes;
 - timeout central do job (o exemplo usa `2h`, a ser calibrado no piloto).
 
@@ -67,6 +72,19 @@ O workflow de release é acionado por tag `quality-v*`. O primeiro flavor .NET �
 ```text
 ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
 ```
+
+A base está temporariamente fixada por digest em MegaLinter v9.5.0/Alpine 3.23. MegaLinter v9.6/Alpine 3.24 com musl 1.2.6 provocou o crash `Failed to allocate signal stack for domain 0` no Semgrep em CPUs Intel afetadas, relacionado a [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933), com correção integrada em [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Atualize a base somente quando uma release do Semgrep incorporar a correção e as duas flavors passarem novamente por build, quick smoke e full smokes no CI.
+
+O workflow já implementa promoção sem reconstrução divergente, mas esse caminho ainda não foi exercitado por uma tag real e nenhuma tag/release deve ser criada nesta etapa:
+
+1. em push e Pull Request, a matriz `validate` faz build e smokes em modo read-only, sem login ou escrita no GHCR;
+2. em uma futura tag `quality-v*`, `release-candidate` constrói e envia uma tag intermediária `validation-*`, captura o digest produzido, baixa exatamente esse digest e repete os smokes;
+3. o mesmo candidate executa o scan Trivy completo, bloqueia qualquer vulnerabilidade `CRITICAL` corrigível e envia o relatório como artifact para auditoria;
+4. somente após essa validação, `publish` promove o mesmo digest para as tags finais com `docker buildx imagetools create`; esse job não reconstrói a imagem.
+
+As tags intermediárias `validation-*` e `promotion-*` são um risco operacional residual. Mantenha o package privado e defina política de retenção/limpeza antes de operar releases continuamente; não apague uma referência necessária durante uma execução em andamento.
+
+O scan local completo de 2026-07-15 encontrou zero `CRITICAL` corrigível nos pacotes Alpine, mas 13 ocorrências em toolchains/bibliotecas da flavor `dotnetweb` (e 18 na `generic`). Elas incluem componentes herdados Node, Go e .NET. Isso não invalida os smokes funcionais nem o piloto local, mas **bloqueia corretamente a primeira tag/imagem versionada**: remedeie e reexecute o scan completo até chegar a zero; não reduza a política do `release-candidate` para contornar o resultado.
 
 Após o build, copie o digest real e configure no GitLab:
 
@@ -177,7 +195,7 @@ O arquivo deve ser `root:root` e modo exato `0444` para ser legível pelo UID `1
 
 Não coloque segredo nesse arquivo. URLs de proxy com userinfo ou `@` são recusadas, pois analisadores que processam o MR poderiam ler/exfiltrar credenciais. Certificados devem ser públicos, root-owned e ficar sob `/etc/code-approval/ca`, `/etc/ssl` ou `/usr/local/share/ca-certificates`; nunca monte chave privada.
 
-Os executáveis são pinados, mas alguns inputs continuam mutáveis e dependentes de rede: ruleset `semgrep --config=p/default`, banco do Trivy e dados OSV. O relatório os marca como não pinados/network-required. Não descreva o scan como totalmente reproduzível ou offline.
+Os executáveis são pinados — inclusive Terrascan v1.19.9 —, mas alguns inputs continuam mutáveis e dependentes de rede: ruleset `semgrep --config=p/default`, banco do Trivy, dados OSV e metadados do Terraform Registry. O relatório registra separadamente o bundle pinado do Terrascan e `registry.terraform.io` como não pinado/network-required. Autorize somente os destinos necessários e planeje cache persistente, gravável pelo UID `10001`, para reduzir variação e indisponibilidade; não coloque tokens de registry nesse cache. Não descreva o scan como totalmente reproduzível ou offline.
 
 ## 8. Resultado, piloto e rollback
 
@@ -207,12 +225,20 @@ Rollback: altere centralmente `CODE_APPROVAL_QUALITY_IMAGE` para o digest anteri
 
 - [ ] Runner `linux/amd64`, UID `10001`, sem root/privileged/socket.
 - [ ] Imagem `dotnetweb` publicada, inspecionada e fixada por digest.
+- [ ] Base MegaLinter v9.5.0/Alpine 3.23 confirmada por digest; qualquer upgrade passou novamente pela matriz completa.
+- [x] O workflow promove o digest exato validado, sem rebuild no job de publicação.
+- [ ] O scan completo chegou a zero `CRITICAL` corrigível em toolchains/bibliotecas (estado local: 13 no `dotnetweb`).
+- [ ] Uma tag real demonstrou candidate, scan Trivy, artifact e promoção do mesmo digest.
+- [ ] Retenção/limpeza das tags privadas `validation-*` e `promotion-*` foi definida.
 - [ ] Policy externa com `schemaVersion: 1` e SHA governado.
 - [ ] Target branch governada e `refs/remotes/origin/<target>` disponível.
 - [ ] Pipeline Execution Policy/compliance definida antes de blocking.
 - [ ] Transporte proxy/CA, se usado, root-owned `0444` e sem segredo.
 - [ ] CI Lint aprovado com o include Sonar corporativo real.
 - [ ] Full image smoke e scanners obrigatórios validados.
+- [ ] Flavor `generic` confirmou 20 analisadores MegaLinter + 8 ferramentas; Terrascan v1.19.9 dedicado roda em project mode sobre projeção apenas Terraform.
+- [ ] Egress e cache para Terrascan/Terraform Registry foram testados sem expor credenciais ao MR.
+- [ ] Um substituto mantido para o Terrascan arquivado está sendo avaliado em shadow mode, sem troca antes da paridade comprovada.
 - [ ] Linters/configs/suppressions/MSBuild inventariados.
 - [ ] Três MRs advisory concluídos e recursos calibrados.
 - [ ] Digest anterior registrado para rollback.

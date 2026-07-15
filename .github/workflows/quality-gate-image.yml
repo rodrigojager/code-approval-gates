@@ -12,8 +12,19 @@ name: Quality Gate container
       - "examples/ci/gitlab-quality-gate.yml"
       - "quality-gate/**"
   push:
+    branches:
+      - main
+      - final
     tags:
       - "quality-v*"
+    paths:
+      - ".github/workflows/quality-gate-image.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "docs/plano-gitlab-quality-gate.md"
+      - "docs/proximos-passos-publicacao-segura.md"
+      - "examples/ci/gitlab-quality-gate.yml"
+      - "quality-gate/**"
   workflow_dispatch:
 
 permissions:
@@ -25,8 +36,8 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/rodrigojager/code-approval-quality-gate
-  MEGALINTER_GENERIC_IMAGE: ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:248e30b43bdfa7ce941fd5e410159da4d69716c68c48a459b08d1760c4625ef5
-  MEGALINTER_DOTNETWEB_IMAGE: ghcr.io/oxsecurity/megalinter-dotnetweb:v9.6.0@sha256:f7a17985de07b494e09952d5689f3cf978a270bb46ca5c4d5e1a05e262977a84
+  MEGALINTER_GENERIC_IMAGE: ghcr.io/oxsecurity/megalinter:v9.5.0@sha256:00830d91da662d05221c1c0005f9010416030bd1da89afbcb55a9c52945ebd48
+  MEGALINTER_DOTNETWEB_IMAGE: ghcr.io/oxsecurity/megalinter-dotnetweb:v9.5.0@sha256:d253bfcbf030c65f7a605dd462b2321f944440a8c23df61f7efac350dc1305f8
 
 jobs:
   release-guard:
@@ -40,9 +51,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require strict stable SemVer, aligned versions, and the tip of main
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/quality-v')
         shell: bash
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -80,14 +92,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - flavor: generic
-            base_image: ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:248e30b43bdfa7ce941fd5e410159da4d69716c68c48a459b08d1760c4625ef5
-          - flavor: dotnetweb
-            base_image: ghcr.io/oxsecurity/megalinter-dotnetweb:v9.6.0@sha256:f7a17985de07b494e09952d5689f3cf978a270bb46ca5c4d5e1a05e262977a84
+        flavor:
+          - generic
+          - dotnetweb
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -102,7 +114,7 @@ jobs:
           push: false
           tags: code-approval-quality-gate:${{ matrix.flavor }}-test
           build-args: |
-            MEGALINTER_IMAGE=${{ matrix.base_image }}
+            MEGALINTER_IMAGE=${{ matrix.flavor == 'generic' && env.MEGALINTER_GENERIC_IMAGE || env.MEGALINTER_DOTNETWEB_IMAGE }}
             QUALITY_GATE_FLAVOR=${{ matrix.flavor }}
           cache-from: type=gha,scope=quality-gate-${{ matrix.flavor }}
           cache-to: type=gha,mode=max,scope=quality-gate-${{ matrix.flavor }}
@@ -142,34 +154,79 @@ jobs:
       - name: Record network-backed analysis inputs
         shell: bash
         run: |
-          echo "### Runtime analysis inputs" >> "$GITHUB_STEP_SUMMARY"
-          echo "Semgrep p/default rules, the Trivy vulnerability database, and OSV data are fetched at scan time." >> "$GITHUB_STEP_SUMMARY"
-          echo "Their sources are reported by the sidecar, but their contents are not digest-pinned yet; CI runners require controlled egress/cache." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Runtime analysis inputs"
+            echo "Semgrep p/default rules, Terrascan Terraform Registry metadata, the Trivy vulnerability database, and OSV data are fetched at scan time."
+            echo "Their sources are reported by the sidecar, but their contents are not digest-pinned yet; CI runners require controlled egress/cache."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Scan image for fixed critical vulnerabilities
+      - name: Scan all fixed critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
           image-ref: code-approval-quality-gate:${{ matrix.flavor }}-test
-          format: table
-          exit-code: "1"
+          scanners: vuln
+          format: json
+          output: trivy-critical-${{ matrix.flavor }}.json
+          exit-code: "0"
           ignore-unfixed: true
           severity: CRITICAL
 
-  publish:
-    name: Publish versioned dotnetweb image
-    if: github.event_name == 'push'
+      - name: Enforce no fixed critical OS vulnerabilities
+        shell: bash
+        env:
+          TRIVY_REPORT: trivy-critical-${{ matrix.flavor }}.json
+        run: |
+          set -euo pipefail
+          jq -e '
+            type == "object" and
+            .SchemaVersion == 2 and
+            (.ArtifactName | type == "string" and length > 0) and
+            (.ArtifactType | type == "string" and length > 0) and
+            (.Results | type == "array" and length > 0) and
+            any(.Results[]; .Class == "os-pkgs") and
+            all(.Results[]; type == "object" and (.Target | type == "string" and length > 0) and (.Class | type == "string" and length > 0) and ((.Vulnerabilities == null) or (.Vulnerabilities | type == "array")))
+          ' "$TRIVY_REPORT" >/dev/null
+          os_count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Vulnerabilities[]?] | length' "$TRIVY_REPORT")"
+          library_count="$(jq '[.Results[]? | select(.Class != "os-pkgs") | .Vulnerabilities[]?] | length' "$TRIVY_REPORT")"
+          echo "Fixed CRITICAL OS findings: $os_count" >> "$GITHUB_STEP_SUMMARY"
+          echo "Fixed CRITICAL toolchain/library findings: $library_count" >> "$GITHUB_STEP_SUMMARY"
+          test "$os_count" -eq 0
+
+      - name: Block releases on any fixed critical vulnerability
+        if: startsWith(github.ref, 'refs/tags/quality-v')
+        shell: bash
+        env:
+          TRIVY_REPORT: trivy-critical-${{ matrix.flavor }}.json
+        run: |
+          set -euo pipefail
+          test "$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$TRIVY_REPORT")" -eq 0
+
+      - name: Upload complete critical-vulnerability report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-critical-${{ matrix.flavor }}
+          path: trivy-critical-${{ matrix.flavor }}.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release-candidate:
+    name: Validate exact release candidate
+    if: startsWith(github.ref, 'refs/tags/quality-v')
     needs:
       - release-guard
       - validate
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -181,21 +238,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate image metadata
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          flavor: |
-            latest=false
-          labels: |
-            io.code-approval.quality-gate.flavor=dotnetweb
-            io.code-approval.quality-gate.platform=linux/amd64
-          tags: |
-            type=match,pattern=quality-v(.*),group=1,suffix=-dotnetweb
-            type=sha,prefix=sha-,suffix=-dotnetweb
-
-      - name: Build and publish dotnetweb image
+      - name: Build and push isolated release candidate
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -203,8 +246,7 @@ jobs:
           file: ./quality-gate/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+          tags: ${{ env.IMAGE_NAME }}:validation-${{ github.run_id }}-${{ github.run_attempt }}-dotnetweb
           build-args: |
             MEGALINTER_IMAGE=${{ env.MEGALINTER_DOTNETWEB_IMAGE }}
             QUALITY_GATE_FLAVOR=dotnetweb
@@ -213,9 +255,232 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      - name: Load the exact candidate by immutable digest
+        shell: bash
+        env:
+          VALIDATED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$VALIDATED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          source_ref="${IMAGE_NAME}@${VALIDATED_DIGEST}"
+          docker pull --platform linux/amd64 "$source_ref"
+          docker tag "$source_ref" code-approval-quality-gate:dotnetweb-release-test
+          docker logout ghcr.io
+
+      - name: Record release image size
+        shell: bash
+        run: |
+          bytes="$(docker image inspect --format '{{.Size}}' code-approval-quality-gate:dotnetweb-release-test)"
+          echo "Release candidate size: $(numfmt --to=iec-i --suffix=B "$bytes")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release duplicated BuildKit cache from runner disk
+        shell: bash
+        run: docker buildx prune --all --force
+
+      - name: Verify release toolchain and non-root execution
+        shell: bash
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:dotnetweb-release-test quick
+
+      - name: Verify release operational tool-error path
+        shell: bash
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:dotnetweb-release-test tool-error
+
+      - name: Verify release clean analyzer evidence
+        shell: bash
+        timeout-minutes: 45
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:dotnetweb-release-test full-clean
+
+      - name: Verify release blocking finding
+        shell: bash
+        timeout-minutes: 45
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:dotnetweb-release-test full-finding
+
+      - name: Scan release candidate for fixed critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: code-approval-quality-gate:dotnetweb-release-test
+          scanners: vuln
+          format: json
+          output: trivy-critical-release-dotnetweb.json
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Require complete report with zero fixed critical vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          report=trivy-critical-release-dotnetweb.json
+          jq -e '
+            type == "object" and
+            .SchemaVersion == 2 and
+            (.ArtifactName | type == "string" and length > 0) and
+            (.ArtifactType | type == "string" and length > 0) and
+            (.Results | type == "array" and length > 0) and
+            any(.Results[]; .Class == "os-pkgs") and
+            all(.Results[]; type == "object" and (.Target | type == "string" and length > 0) and (.Class | type == "string" and length > 0) and ((.Vulnerabilities == null) or (.Vulnerabilities | type == "array")))
+          ' "$report" >/dev/null
+          test "$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$report")" -eq 0
+
+      - name: Upload release vulnerability report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-critical-release-dotnetweb
+          path: trivy-critical-release-dotnetweb.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Record the exact validated release digest
+        shell: bash
+        env:
+          VALIDATED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$VALIDATED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$VALIDATED_DIGEST" > validated-dotnetweb-digest.txt
+
+      - name: Upload validated release digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validated-dotnetweb-digest
+          path: validated-dotnetweb-digest.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish versioned dotnetweb image
+    if: startsWith(github.ref, 'refs/tags/quality-v')
+    needs:
+      - release-guard
+      - validate
+      - release-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download validated release digest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: validated-dotnetweb-digest
+          path: validated-release
+
+      - name: Promote the exact validated manifest
+        id: promote
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mapfile -t digest_lines < validated-release/validated-dotnetweb-digest.txt
+          [[ "${#digest_lines[@]}" -eq 1 ]]
+          validated_digest="${digest_lines[0]}"
+          [[ "$validated_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          release_version="${GITHUB_REF_NAME#quality-v}"
+          version_tag="${release_version}-dotnetweb"
+          sha_tag="sha-${GITHUB_SHA:0:12}-dotnetweb"
+          version_ref="${IMAGE_NAME}:${release_version}-dotnetweb"
+          sha_ref="${IMAGE_NAME}:sha-${GITHUB_SHA:0:12}-dotnetweb"
+          registry_token="$(curl --silent --show-error --fail --location \
+            --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            --user "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+            'https://ghcr.io/token?service=ghcr.io&scope=repository:rodrigojager/code-approval-quality-gate:pull' \
+            | jq -er '.token')"
+          registry_tag_digest() {
+            local tag="$1"
+            local headers status digest
+            headers="$(mktemp)"
+            if ! status="$(curl --silent --show-error --location --head \
+              --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              --header "Authorization: Bearer ${registry_token}" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              --dump-header "$headers" --output /dev/null --write-out '%{http_code}' \
+              "https://ghcr.io/v2/rodrigojager/code-approval-quality-gate/manifests/${tag}")"; then
+              rm -f "$headers"
+              return 2
+            fi
+            case "$status" in
+              200)
+                digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "$headers" | tail -n 1)"
+                rm -f "$headers"
+                [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 2
+                printf '%s\n' "$digest"
+                ;;
+              404)
+                rm -f "$headers"
+                return 1
+                ;;
+              *)
+                echo "GHCR manifest lookup for ${tag} failed with HTTP ${status}." >&2
+                rm -f "$headers"
+                return 2
+                ;;
+            esac
+          }
+          version_existing=""
+          if version_existing="$(registry_tag_digest "$version_tag")"; then
+            :
+          else
+            lookup_status=$?
+            [[ "$lookup_status" -eq 1 ]] || exit "$lookup_status"
+          fi
+          sha_existing=""
+          if sha_existing="$(registry_tag_digest "$sha_tag")"; then
+            :
+          else
+            lookup_status=$?
+            [[ "$lookup_status" -eq 1 ]] || exit "$lookup_status"
+          fi
+          for existing_digest in "$version_existing" "$sha_existing"; do
+            if [[ -n "$existing_digest" && "$existing_digest" != "$validated_digest" ]]; then
+              echo "Refusing to overwrite an existing release tag with a different digest." >&2
+              exit 1
+            fi
+          done
+          promotion_ref="${IMAGE_NAME}:promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-dotnetweb"
+          docker buildx imagetools create \
+            --tag "$promotion_ref" \
+            "${IMAGE_NAME}@${validated_digest}"
+          promotion_tag="promotion-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-dotnetweb"
+          [[ "$(registry_tag_digest "$promotion_tag")" == "$validated_digest" ]]
+          publish_tags=()
+          [[ -n "$version_existing" ]] || publish_tags+=(--tag "$version_ref")
+          [[ -n "$sha_existing" ]] || publish_tags+=(--tag "$sha_ref")
+          if [[ "${#publish_tags[@]}" -gt 0 ]]; then
+            docker buildx imagetools create \
+              "${publish_tags[@]}" \
+              "${IMAGE_NAME}@${validated_digest}"
+          fi
+          for published_ref in "$version_ref" "$sha_ref"; do
+            published_tag="${published_ref##*:}"
+            actual_digest="$(registry_tag_digest "$published_tag")"
+            [[ "$actual_digest" == "$validated_digest" ]]
+          done
+          {
+            echo "digest=$validated_digest"
+            echo "version_ref=$version_ref"
+            echo "sha_ref=$sha_ref"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Record published digest
         shell: bash
         run: |
-          echo "Image: ${{ env.IMAGE_NAME }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Flavor: dotnetweb" >> "$GITHUB_STEP_SUMMARY"
-          echo "Digest: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Version tag: ${{ steps.promote.outputs.version_ref }}"
+            echo "Commit tag: ${{ steps.promote.outputs.sha_ref }}"
+            echo "Flavor: dotnetweb"
+            echo "Validated and published digest: ${{ steps.promote.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"

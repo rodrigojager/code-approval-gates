@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+set -f
 
 # The GitLab-facing launcher is a trust boundary. Start the Python process with
 # an empty environment and copy only the inputs that the governed CI contract
@@ -18,6 +19,11 @@ fail_configuration() {
 if [ ! -r "$QUALITY_CI_PATH_FILE" ]; then
   fail_configuration "trusted PATH file is missing or unreadable"
 fi
+if [ ! -f "$QUALITY_CI_PATH_FILE" ] || [ -L "$QUALITY_CI_PATH_FILE" ]; then
+  fail_configuration "trusted PATH file is non-regular or a symlink"
+fi
+[ "$(/bin/stat -c '%u:%g:%a' "$QUALITY_CI_PATH_FILE")" = "0:0:444" ] \
+  || fail_configuration "trusted PATH file must be root:root mode 0444"
 
 # Accept one non-empty line (plus its normal trailing newline) and reject any
 # injected second line or carriage return. The file is baked root:root 0444.
@@ -41,17 +47,49 @@ readonly QUALITY_CI_PATH
 
 validate_trusted_path_chain() {
   current_path=$1
+  require_traverse=${2:-false}
   while [ "$current_path" != "/" ]; do
-    owner=$(/bin/stat -c '%u:%g' "$current_path") || fail_configuration "cannot stat trusted CA path"
-    mode=$(/bin/stat -c '%a' "$current_path") || fail_configuration "cannot read trusted CA permissions"
-    [ "$owner" = "0:0" ] || fail_configuration "trusted CA path must be owned by root:root"
+    owner=$(/bin/stat -c '%u:%g' "$current_path") || fail_configuration "cannot stat trusted path component"
+    mode=$(/bin/stat -c '%a' "$current_path") || fail_configuration "cannot read trusted path permissions"
+    [ "$owner" = "0:0" ] || fail_configuration "trusted path components must be owned by root:root"
     case "$mode" in
       [0-7][0145][0145]) ;;
-      *) fail_configuration "trusted CA path must not be group- or world-writable" ;;
+      *) fail_configuration "trusted path components must not be group- or world-writable" ;;
     esac
+    if [ "$require_traverse" = "true" ]; then
+      case "$mode" in
+        [0-7][0145][15]) ;;
+        *) fail_configuration "trusted PATH components must be traversable by the quality user" ;;
+      esac
+    fi
     current_path=$(/usr/bin/dirname "$current_path")
   done
 }
+
+case "$QUALITY_CI_PATH" in
+  :*|*::|*:)
+    fail_configuration "trusted PATH contains an empty entry"
+    ;;
+esac
+old_ifs=$IFS
+IFS=:
+for path_dir in $QUALITY_CI_PATH; do
+  case "$path_dir" in
+    /*) ;;
+    *) fail_configuration "trusted PATH entries must be absolute" ;;
+  esac
+  case "$path_dir" in
+    /root|/root/*) fail_configuration "trusted PATH must not traverse /root" ;;
+  esac
+  canonical_path_dir=$(/usr/bin/readlink -f "$path_dir") \
+    || fail_configuration "trusted PATH entry does not resolve"
+  [ "$canonical_path_dir" = "$path_dir" ] \
+    || fail_configuration "trusted PATH entries must already be canonical"
+  [ -d "$path_dir" ] || fail_configuration "trusted PATH entry is not a directory"
+  [ -x "$path_dir" ] || fail_configuration "trusted PATH entry is not traversable"
+  validate_trusted_path_chain "$path_dir" true
+done
+IFS=$old_ifs
 
 validate_ca_setting() {
   ca_name=$1

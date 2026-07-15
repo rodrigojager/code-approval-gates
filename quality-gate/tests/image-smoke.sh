@@ -7,6 +7,34 @@ scenario="${2:-all}"
 run_toolchain_and_non_root_smoke() {
   docker run --rm --entrypoint bash "$image" -ceu '
     test "$(id -u)" = "10001"
+    trusted_path="$(< /etc/code-approval/quality-gate-path)"
+    case "$trusted_path" in
+      ""|*"~"*|*"/root/"*|:*|*::*|*:) exit 1 ;;
+    esac
+    IFS=: read -r -a trusted_path_entries <<< "$trusted_path"
+    for path_dir in "${trusted_path_entries[@]}"; do
+      case "$path_dir" in /*) ;; *) exit 1 ;; esac
+      test -d "$path_dir"
+      test "$(/usr/bin/readlink -f "$path_dir")" = "$path_dir"
+      test "$(/bin/stat -c "%u:%g" "$path_dir")" = "0:0"
+      case "$(/bin/stat -c "%a" "$path_dir")" in [0-7][0145][15]) ;; *) exit 1 ;; esac
+      test -x "$path_dir"
+      for candidate in "$path_dir"/*; do
+        test -e "$candidate" || continue
+        test -f "$candidate" || continue
+        test -x "$candidate" || continue
+        test ! -w "$candidate"
+      done
+    done
+    shadow=/tmp/quality-path-shadow
+    mkdir -p "$shadow/~/.raku/bin"
+    printf "%s\n" "#!/bin/sh" "exit 97" > "$shadow/~/.raku/bin/java"
+    chmod +x "$shadow/~/.raku/bin/java"
+    (
+      cd "$shadow"
+      PATH="$trusted_path" /opt/venvs/quality-sidecar/bin/python -c \
+        '"'"'import pathlib, shutil; resolved = shutil.which("java"); assert resolved and pathlib.Path(resolved).is_absolute(); assert "quality-path-shadow" not in resolved'"'"'
+    )
     test -r /opt/quality-sidecar/sidecar/config/eslint.config.mjs
     test -r /opt/quality-sidecar/sidecar/config/megalinter-ci.yml
     /opt/venvs/quality-sidecar/bin/pip check
@@ -15,6 +43,39 @@ run_toolchain_and_non_root_smoke() {
     for tool in quality-sidecar quality-ci semgrep checkov gitleaks trivy osv-scanner jscpd; do
       command -v "$tool" >/dev/null
     done
+    test "$(command -v jscpd)" = "/usr/local/bin/jscpd"
+    test "$(jscpd --version)" = "cpd 5.0.12"
+    if test "$(< /etc/code-approval/quality-gate-flavor)" = "dotnetweb"; then
+      test "$(command -v csharpier)" = "/opt/megalinter-dotnet-tools/csharpier"
+      test "$(command -v roslynator)" = "/opt/megalinter-dotnet-tools/roslynator"
+      csharpier --version >/dev/null
+      roslynator --version >/dev/null
+    else
+      test "$(command -v terrascan)" = "/usr/bin/terrascan"
+      test "$(terrascan version)" = "version: v1.19.9"
+      for tool in csharpier devskim roslynator tsqllint; do
+        test "$(command -v "$tool")" = "/opt/megalinter-dotnet-tools/$tool"
+        "$tool" --version >/dev/null
+      done
+      for tool in phpcs phpstan psalm phplint php-cs-fixer; do
+        test "$(command -v "$tool")" = "/opt/megalinter-composer/vendor/bin/$tool"
+        "$tool" --version >/dev/null
+      done
+      test "$(command -v cargo-clippy)" = "/opt/megalinter-rust-toolchain/bin/cargo-clippy"
+      cargo-clippy --version >/dev/null
+      cargo_smoke=/tmp/quality-cargo-smoke
+      mkdir -p "$cargo_smoke/src"
+      printf "%s\n" \
+        "[package]" \
+        "name = \"quality-gate-smoke\"" \
+        "version = \"0.1.0\"" \
+        "edition = \"2024\"" \
+        "" \
+        "[lib]" \
+        "path = \"src/lib.rs\"" > "$cargo_smoke/Cargo.toml"
+      printf "%s\n" "pub fn answer() -> u32 { 42 }" > "$cargo_smoke/src/lib.rs"
+      PATH="$trusted_path" cargo clippy --manifest-path "$cargo_smoke/Cargo.toml" -- -D warnings >/dev/null
+    fi
     test "$(node -e '"'"'const { createRequire } = require("node:module"); const trustedRequire = createRequire("/node-deps/package.json"); process.stdout.write(trustedRequire.resolve("@eslint/js"));'"'"')" = "/node-deps/node_modules/@eslint/js/src/index.js"
     node --input-type=module -e '"'"'await import("/opt/quality-sidecar/sidecar/config/eslint.config.mjs")'"'"'
 
@@ -112,15 +173,10 @@ run_toolchain_and_non_root_smoke() {
 run_tool_error_smoke() {
   docker run --rm --entrypoint bash "$image" -ceu '
     target=/tmp/quality-tool-error
-    shims=/tmp/quality-tool-shims
-    mkdir -p "$target" "$shims"
-    for tool in semgrep gitleaks trivy checkov osv-scanner jscpd; do
-      printf "%s\n" "#!/bin/sh" "exit 0" > "$shims/$tool"
-      chmod +x "$shims/$tool"
-    done
+    mkdir -p "$target"
 
     set +e
-    PATH="$shims:$PATH" MEGALINTER_COMMAND=/does-not-exist \
+    MEGALINTER_COMMAND=/does-not-exist \
       /opt/quality-sidecar/entrypoint.sh check "$target" \
         --mode full \
         --disable-iac \
@@ -140,14 +196,39 @@ run_tool_error_smoke() {
 run_full_finding_smoke() {
   docker run --rm --entrypoint bash "$image" -ceu '
     target=/tmp/quality-full-finding
-    mkdir -p "$target"
+    flavor=$(cat /etc/code-approval/quality-gate-flavor)
+    expected_tool_count=7
+    if test "$flavor" = "generic"; then
+      expected_tool_count=8
+    fi
+    mkdir -p "$target/infra/terraform"
     printf "%s\n" "key: [unterminated" > "$target/broken.yaml"
     printf "%s\n" "result = eval(input())" > "$target/sample.py"
+    printf "%s\n" \
+      "export function summarize (values) {" \
+      "  const filtered = values.filter((value) => value > 0)" \
+      "  const doubled = filtered.map((value) => value * 2)" \
+      "  const total = doubled.reduce((sum, value) => sum + value, 0)" \
+      "  const average = doubled.length === 0 ? 0 : total / doubled.length" \
+      "  return { count: doubled.length, total, average }" \
+      "}" \
+      "" \
+      "console.log(summarize([1, 2, 3, 4, 5]))" > "$target/duplicate-a.js"
+    cp "$target/duplicate-a.js" "$target/duplicate-b.js"
     printf "%s\n" "urllib3==1.26.0" > "$target/requirements.txt"
     printf "%s\n" \
       "resource \"aws_s3_bucket\" \"public\" {" \
       "  bucket = \"quality-gate-smoke-fixture\"" \
-      "}" > "$target/main.tf"
+      "}" > "$target/infra/terraform/main.tf"
+    printf "%s\n" \
+      "resource \"aws_s3_bucket_server_side_encryption_configuration\" \"public\" {" \
+      "  bucket = aws_s3_bucket.public.id" \
+      "  rule {" \
+      "    apply_server_side_encryption_by_default {" \
+      "      sse_algorithm = \"AES256\"" \
+      "    }" \
+      "  }" \
+      "}" > "$target/infra/terraform/encryption.tf"
     printf "token = \"%s%s\"\n" "ghp_" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "$target/synthetic-secret.txt"
 
     set +e
@@ -165,25 +246,47 @@ run_full_finding_smoke() {
     report="$target/.quality/reports/quality-report.json"
     jq -e ".status == \"REJECTED\"" "$report" >/dev/null
     jq -e ".findings | length > 0" "$report" >/dev/null
-    jq -e "([.tools[] | select(
+    jq -e --argjson expected "$expected_tool_count" "([.tools[] | select(
       .name == \"megalinter\" or
       .name == \"semgrep\" or
       .name == \"gitleaks\" or
       .name == \"trivy\" or
       .name == \"checkov\" or
       .name == \"osv-scanner\" or
-      .name == \"jscpd\"
-    )] | length) == 7" "$report" >/dev/null
+      .name == \"jscpd\" or
+      .name == \"terrascan\"
+    )] | length) == \$expected" "$report" >/dev/null
     jq -e "[.tools[] | select(.status == \"missing\" or .status == \"error\" or .status == \"timeout\")] | length == 0" "$report" >/dev/null
+    jq -e ".tools[] | select(.name == \"jscpd\") | .status == \"findings\" and .summary.findings > 0" "$report" >/dev/null
+    if test "$flavor" = "generic"; then
+      jq -e ".tools[] | select(.name == \"terrascan\") | .status == \"findings\" and .summary.evidenceValid == true" "$report" >/dev/null
+      jq -e ".findings[] | select(.tool == \"terrascan\" and .rule == \"AC_AWS_0207\" and .path == \"infra/terraform/encryption.tf\")" "$report" >/dev/null
+    else
+      jq -e "[.tools[] | select(.name == \"terrascan\")] | length == 0" "$report" >/dev/null
+    fi
   '
 }
 
 run_full_clean_smoke() {
   docker run --rm --entrypoint bash "$image" -ceu '
     target=/tmp/quality-full-clean
-    mkdir -p "$target"
+    flavor=$(cat /etc/code-approval/quality-gate-flavor)
+    expected_tool_count=7
+    if test "$flavor" = "generic"; then
+      expected_tool_count=8
+    fi
+    mkdir -p "$target/infra/terraform"
     printf "%s\n" "---" "key: value" > "$target/sample.yaml"
-    printf "%s\n" "const answer = 42" "answer.toString()" > "$target/sample.js"
+    printf "%s\n" \
+      "export function summarize (values) {" \
+      "  const filtered = values.filter((value) => value > 0)" \
+      "  const doubled = filtered.map((value) => value * 2)" \
+      "  const total = doubled.reduce((sum, value) => sum + value, 0)" \
+      "  const average = doubled.length === 0 ? 0 : total / doubled.length" \
+      "  return { count: doubled.length, total, average }" \
+      "}" \
+      "" \
+      "console.log(summarize([1, 2, 3, 4, 5]))" > "$target/sample.js"
     printf "%s\n" "packaging==25.0" > "$target/requirements.txt"
     printf "%s\n" \
       "terraform {" \
@@ -196,22 +299,18 @@ run_full_clean_smoke() {
       "" \
       "output \"name\" {" \
       "  value = var.name" \
-      "}" > "$target/main.tf"
+      "}" > "$target/infra/terraform/main.tf"
 
-    if test "$(< /etc/code-approval/quality-gate-flavor)" = "dotnetweb"; then
-      printf "%s\n" \
-        "<Project Sdk=\"Microsoft.NET.Sdk\">" \
-        "" \
-        "  <PropertyGroup>" \
-        "    <OutputType>Exe</OutputType>" \
-        "    <TargetFramework>net10.0</TargetFramework>" \
-        "    <ImplicitUsings>enable</ImplicitUsings>" \
-        "    <Nullable>enable</Nullable>" \
-        "  </PropertyGroup>" \
-        "" \
-        "</Project>" > "$target/Smoke.csproj"
-      printf "%s\n" "Console.WriteLine(\"Quality gate smoke.\");" > "$target/Program.cs"
-    fi
+    printf "%s\n" \
+      "<Project Sdk=\"Microsoft.NET.Sdk\">" \
+      "  <PropertyGroup>" \
+      "    <OutputType>Exe</OutputType>" \
+      "    <TargetFramework>net10.0</TargetFramework>" \
+      "    <ImplicitUsings>enable</ImplicitUsings>" \
+      "    <Nullable>enable</Nullable>" \
+      "  </PropertyGroup>" \
+      "</Project>" > "$target/Smoke.csproj"
+    printf "%s\n" "Console.WriteLine(\"Quality gate smoke.\");" > "$target/Program.cs"
 
     set +e
     /opt/quality-sidecar/entrypoint.sh check "$target" \
@@ -234,17 +333,27 @@ run_full_clean_smoke() {
       exit "$gate_status"
     fi
     jq -e ".status == \"APPROVED\" and (.findings | length == 0)" "$report" >/dev/null
-    jq -e "([.tools[] | select(
+    jq -e --argjson expected "$expected_tool_count" "([.tools[] | select(
       .name == \"megalinter\" or
       .name == \"semgrep\" or
       .name == \"gitleaks\" or
       .name == \"trivy\" or
       .name == \"checkov\" or
       .name == \"osv-scanner\" or
-      .name == \"jscpd\"
-    )] | length) == 7" "$report" >/dev/null
+      .name == \"jscpd\" or
+      .name == \"terrascan\"
+    )] | length) == \$expected" "$report" >/dev/null
     jq -e "[.tools[] | select(.name != \"megalinter\") | .summary.evidenceValid] | all" "$report" >/dev/null
     jq -e "[.tools[] | select(.status == \"missing\" or .status == \"error\" or .status == \"timeout\" or .status == \"skipped\")] | length == 0" "$report" >/dev/null
+    if test "$flavor" = "generic"; then
+      jq -e ".tools[] | select(.name == \"terrascan\") | .status == \"ok\" and .summary.findings == 0 and .summary.evidenceValid == true" "$report" >/dev/null
+      jq -e "((.results.violations // []) | length == 0) and ((.results.skipped_violations // []) | length == 0) and ((.results.scan_errors // []) | length == 0)" \
+        "$target/.quality/reports/raw/terrascan.json" >/dev/null
+    else
+      jq -e "[.tools[] | select(.name == \"terrascan\")] | length == 0" "$report" >/dev/null
+    fi
+    jq -e ".statistics.total.sources > 0 and .statistics.total.lines > 0" \
+      "$target/.quality/reports/raw/jscpd/jscpd-report.json" >/dev/null
   '
 }
 

@@ -22,7 +22,7 @@ class StaticQualityGateContractTests(unittest.TestCase):
     def test_dockerfile_contains_complete_sidecar_toolchain(self) -> None:
         dockerfile = read("Dockerfile")
         required_fragments = [
-            "ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:",
+            "ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.5.0@sha256:00830d91da662d05221c1c0005f9010416030bd1da89afbcb55a9c52945ebd48",
             "ARG QUALITY_GATE_FLAVOR=generic",
             '"semgrep==${SEMGREP_INSTALL_VERSION}"',
             '"checkov==${CHECKOV_INSTALL_VERSION}"',
@@ -38,6 +38,20 @@ class StaticQualityGateContractTests(unittest.TestCase):
             "google/osv-scanner",
             "osv-scanner_linux_${release_arch}",
             'npm install -g "jscpd@${JSCPD_INSTALL_VERSION}"',
+            "apk upgrade --no-cache",
+            "chmod 0555 /usr/bin/hadolint",
+            "cp -al /root/.dotnet/tools/. /opt/megalinter-dotnet-tools/",
+            "cp -al /root/.composer/vendor/. /opt/megalinter-composer/vendor/",
+            "cp -al /root/.rustup/toolchains/stable-x86_64-unknown-linux-musl/. /opt/megalinter-rust-toolchain/",
+            "aa3808d2dbb71e8522c274ace56b86bddbd6e41e8c93e1626fe8c0693c5ab72a",
+            "54ccd8bc063777753f3f55b8d61cd85c6fa972c140729ad939225ee60db94d20",
+            "tee /dev/stderr",
+            'ENV PATH="/usr/local/bin:/opt/megalinter-dotnet-tools:/opt/megalinter-composer/vendor/bin:/opt/megalinter-rust-toolchain/bin:${PATH}"',
+            "append_trusted_path",
+            "case \"${candidate}\" in /*)",
+            "[0-7][0145][15]",
+            "test ! -e /opt/megalinter-composer/auth.json",
+            'test "$(command -v jscpd)" = "/usr/local/bin/jscpd"',
             "sha256sum -c -",
             'test "${TARGETARCH}" = "amd64"',
             "USER quality",
@@ -62,12 +76,26 @@ class StaticQualityGateContractTests(unittest.TestCase):
     def test_entrypoint_accepts_quality_check_alias_and_check_command(self) -> None:
         entrypoint = read("docker/entrypoint.sh")
 
-        self.assertTrue(entrypoint.startswith("#!/bin/bash"))
+        self.assertTrue(entrypoint.startswith("#!/bin/sh"))
+        self.assertIn("/etc/code-approval/quality-gate-path", entrypoint)
+        self.assertIn("PATH=$QUALITY_ENTRYPOINT_PATH", entrypoint)
+        self.assertNotIn("BASH_ENV", entrypoint)
         self.assertIn("quality-sidecar", entrypoint)
         self.assertIn("quality-check", entrypoint)
         self.assertIn("quality-ci", entrypoint)
         self.assertIn('exec /usr/local/bin/quality-ci "$@"', entrypoint)
         self.assertIn("exec /opt/venvs/quality-sidecar/bin/python -m quality_sidecar", entrypoint)
+
+    def test_image_smokes_prove_jscpd_scans_sources_and_detects_duplicates(self) -> None:
+        smoke = read("tests/image-smoke.sh")
+
+        self.assertIn(".statistics.total.sources > 0", smoke)
+        self.assertIn(".statistics.total.lines > 0", smoke)
+        self.assertIn('.name == \\"jscpd\\"', smoke)
+        self.assertIn('.status == \\"findings\\" and .summary.findings > 0', smoke)
+        self.assertIn("quality-path-shadow", smoke)
+        self.assertIn("pathlib.Path(resolved).is_absolute()", smoke)
+        self.assertIn("cargo clippy", smoke)
 
     def test_gitlab_launcher_scrubs_environment_before_python(self) -> None:
         launcher = read("docker/quality-ci")
@@ -206,6 +234,10 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn('createRequire("/node-deps/package.json")', eslint_policy)
         self.assertIn('"TERRAFORM_TFLINT_RULES_PATH"', tools)
         self.assertIn('"TERRAFORM_TFLINT_CONFIG_FILE"', tools)
+        self.assertIn('"TERRAFORM_TERRASCAN"', tools)
+        self.assertIn('"terrascan",', tools)
+        self.assertIn('"--iac-dir",', tools)
+        self.assertNotIn('"TERRAFORM_TERRASCAN_CLI_LINT_MODE"', tools)
         self.assertIn("tflint-ci.hcl", tools)
         self.assertIn("{}", trusted_megalinter_config)
 
@@ -240,12 +272,29 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("^quality-v(0|[1-9][0-9]*)", workflow)
         self.assertIn("packages: write", workflow)
         self.assertIn("secrets.GITHUB_TOKEN", workflow)
+        self.assertIn("release-candidate:", workflow)
         self.assertIn("provenance: mode=max", workflow)
         self.assertIn("sbom: true", workflow)
-        self.assertIn("flavor: |\n            latest=false", workflow)
         self.assertIn("load: true", workflow)
-        self.assertIn("QUALITY_GATE_FLAVOR=dotnetweb", workflow)
-        self.assertIn("suffix=-dotnetweb", workflow)
+        self.assertIn("QUALITY_GATE_FLAVOR=${{ matrix.flavor }}", workflow)
+        self.assertIn("validated-dotnetweb-digest", workflow)
+        self.assertIn("docker buildx imagetools create", workflow)
+        self.assertIn('[[ "$actual_digest" == "$validated_digest" ]]', workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("Load the exact candidate by immutable digest", workflow)
+        self.assertIn("Refusing to overwrite an existing release tag", workflow)
+        self.assertIn("docker logout ghcr.io", workflow)
+        self.assertIn('case "$status" in', workflow)
+        self.assertIn("404)", workflow)
+        self.assertIn("GHCR manifest lookup", workflow)
+        self.assertIn(".SchemaVersion == 2", workflow)
+        self.assertIn('any(.Results[]; .Class == "os-pkgs")', workflow)
+        self.assertEqual(workflow.count("docker/build-push-action@"), 2)
+        validate_section = workflow.split("\n  validate:\n", 1)[1].split("\n  release-candidate:\n", 1)[0]
+        self.assertNotIn("packages: write", validate_section)
+        self.assertNotIn("secrets.GITHUB_TOKEN", validate_section)
+        publish_section = workflow.split("\n  publish:\n", 1)[1]
+        self.assertNotIn("docker/build-push-action@", publish_section)
         self.assertIn("linux/amd64", workflow)
         self.assertNotIn("linux/arm64", workflow)
         self.assertIn("image-smoke.sh", workflow)
@@ -253,6 +302,9 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("full-clean", workflow)
         self.assertIn("tool-error", workflow)
         self.assertIn("aquasecurity/trivy-action@", workflow)
+        self.assertIn("Enforce no fixed critical OS vulnerabilities", workflow)
+        self.assertIn("Block releases on any fixed critical vulnerability", workflow)
+        self.assertIn("trivy-critical-${{ matrix.flavor }}", workflow)
         self.assertIn('release_version="${RELEASE_TAG#quality-v}"', workflow)
         self.assertIn("require('./package.json').version", workflow)
         self.assertIn("require('./quality-gate/package.json').version", workflow)

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from quality_sidecar.tools import (  # noqa: E402
     _parse_checkov,
     _quality_gate_flavor,
     _parse_megalinter,
+    _parse_terrascan,
     _parse_trivy,
     _prepare_raw_dir,
     _run_checkov,
@@ -33,7 +35,9 @@ from quality_sidecar.tools import (  # noqa: E402
     _run_megalinter,
     _run_osv_scanner,
     _run_semgrep,
+    _run_terrascan,
     _run_trivy,
+    _terraform_file_lists,
     parse_tool_findings,
     run_command,
     run_external_tools,
@@ -334,6 +338,8 @@ class QualityPolicyTests(unittest.TestCase):
             exclusion = re.compile(environment["FILTER_REGEX_EXCLUDE"])
             self.assertIsNone(exclusion.search((target / "sample.js").as_posix()))
             self.assertIsNotNone(exclusion.search((target / "src" / "tmp" / "artifact.js").as_posix()))
+            self.assertIsNone(exclusion.search((target / "src" / "obj" / "generated.cs").as_posix()))
+            self.assertIsNone(exclusion.search((target / "src" / "bin" / "source.js").as_posix()))
             trusted_config = Path(environment["MEGALINTER_CONFIG"])
             self.assertTrue(trusted_config.is_absolute())
             self.assertEqual(trusted_config.name, "megalinter-ci.yml")
@@ -341,6 +347,7 @@ class QualityPolicyTests(unittest.TestCase):
             self.assertIn("--no-inline-config", environment["JAVASCRIPT_ES_ARGUMENTS"])
             self.assertEqual(environment["TERRAFORM_TFLINT_RULES_PATH"], str(MEGALINTER_CONFIG_DIR))
             self.assertEqual(environment["TERRAFORM_TFLINT_CONFIG_FILE"], "tflint-ci.hcl")
+            self.assertEqual(environment["FORMATTERS_DISABLE_ERRORS"], "false")
 
     def test_generic_flavor_preserves_megalinter_language_auto_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -363,6 +370,232 @@ class QualityPolicyTests(unittest.TestCase):
             self.assertIn("REPOSITORY_SEMGREP", environment["DISABLE_LINTERS"])
             self.assertIn("COPYPASTE_JSCPD", environment["DISABLE_LINTERS"])
             self.assertIn("REPOSITORY_GIT_DIFF", environment["DISABLE_LINTERS"])
+            self.assertIn("TERRAFORM_TERRASCAN", environment["DISABLE_LINTERS"])
+            self.assertNotIn("TERRAFORM_TERRASCAN_CLI_LINT_MODE", environment)
+
+    def test_terrascan_uses_a_filtered_project_projection_and_sanitizes_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "source"
+            raw = Path(temp) / "raw"
+            target.mkdir()
+            raw.mkdir()
+            (target / "infra" / "modules" / "example").mkdir(parents=True)
+            (target / "infra" / "main.tf").write_text('resource "aws_s3_bucket" "example" {}\n', encoding="utf-8")
+            (target / "infra" / "modules" / "example" / "encryption.tf").write_text(
+                'resource "aws_s3_bucket_server_side_encryption_configuration" "example" {}\n',
+                encoding="utf-8",
+            )
+            (target / "infra" / "values.tfvars").write_text('region = "us-east-1"\n', encoding="utf-8")
+            (target / "environments").mkdir()
+            (target / "environments" / "dev.tfvars").write_text('region = "us-east-1"\n', encoding="utf-8")
+            (target / "bin").mkdir()
+            (target / "bin" / "source.js").write_text("export const value = 1\n", encoding="utf-8")
+            (target / "obj").mkdir()
+            (target / "obj" / "generated.json").write_text("{}\n", encoding="utf-8")
+            primary, projection_files = _terraform_file_lists(detect_iac_files(target))
+            observed_projection: Path | None = None
+
+            def fake_run(name: str, command: list[str], output_dir: Path, **kwargs: object) -> ToolResult:
+                nonlocal observed_projection
+                self.assertEqual(name, "terrascan")
+                observed_projection = Path(command[command.index("--iac-dir") + 1])
+                self.assertTrue((observed_projection / "infra" / "main.tf").is_file())
+                self.assertTrue((observed_projection / "infra" / "modules" / "example" / "encryption.tf").is_file())
+                self.assertTrue((observed_projection / "infra" / "values.tfvars").is_file())
+                self.assertTrue((observed_projection / "environments" / "dev.tfvars").is_file())
+                self.assertTrue((observed_projection / "quality_gate_projection_anchor.tf").is_file())
+                self.assertTrue((observed_projection / "infra" / "modules" / "quality_gate_projection_anchor.tf").is_file())
+                self.assertTrue((observed_projection / "environments" / "quality_gate_projection_anchor.tf").is_file())
+                self.assertFalse((observed_projection / "infra" / "quality_gate_projection_anchor.tf").exists())
+                self.assertFalse((observed_projection / "bin").exists())
+                self.assertFalse((observed_projection / "obj").exists())
+                stdout = output_dir / "terrascan.stdout.log"
+                stdout.write_text(
+                    json.dumps(
+                        {
+                            "results": {
+                                "scan_summary": {
+                                    "file/folder": str(observed_projection),
+                                    "iac_type": "terraform",
+                                    "policies_validated": 10,
+                                    "violated_policies": 0,
+                                    "low": 0,
+                                    "medium": 0,
+                                    "high": 0,
+                                },
+                                "violations": None,
+                                "skipped_violations": None,
+                                "scan_errors": None,
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return ToolResult(
+                    name=name,
+                    status="ok",
+                    exit_code=0,
+                    output_path=str(kwargs["output_path"]),
+                    stdout_path=str(stdout),
+                )
+
+            with patch("quality_sidecar.tools.run_command", side_effect=fake_run):
+                result = _run_terrascan(target, raw, primary, projection_files)
+
+            self.assertEqual(result.status, "ok")
+            self.assertIsNotNone(observed_projection)
+            self.assertFalse(observed_projection.exists())
+            report = json.loads((raw / "terrascan.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["results"]["scan_summary"]["file/folder"], ".")
+            self.assertEqual(result.summary["iacFiles"], 2)
+            self.assertEqual(result.summary["projectionFiles"], 4)
+            self.assertEqual(result.summary["projectionAnchors"], 3)
+            self.assertTrue(result.summary["analysisInput"]["pinned"])
+            self.assertFalse(result.summary["analysisInput"]["networkRequired"])
+            self.assertEqual(result.summary["runtimeInputs"][0]["source"], "registry.terraform.io")
+            self.assertFalse(result.summary["runtimeInputs"][0]["pinned"])
+
+    def test_terrascan_cross_file_violation_keeps_real_rule_and_path(self) -> None:
+        payload = {
+            "results": {
+                "scan_summary": {
+                    "file/folder": ".",
+                    "iac_type": "terraform",
+                    "policies_validated": 10,
+                    "violated_policies": 1,
+                    "low": 0,
+                    "medium": 0,
+                    "high": 1,
+                },
+                "violations": [
+                    {
+                        "rule_name": "s3BucketSseRulesWithKmsNull",
+                        "description": "S3 encryption must use a customer-managed KMS key.",
+                        "rule_id": "AC_AWS_0207",
+                        "severity": "HIGH",
+                        "category": "Security",
+                        "resource_name": "example",
+                        "resource_type": "aws_s3_bucket_server_side_encryption_configuration",
+                        "module_name": "root",
+                        "file": "encryption.tf",
+                        "line": 1,
+                    }
+                ],
+                "skipped_violations": None,
+            }
+        }
+        findings = _parse_terrascan(payload, Path("/workspace"))
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].tool, "terrascan")
+        self.assertEqual(findings[0].rule, "AC_AWS_0207")
+        self.assertEqual(findings[0].path, "encryption.tf")
+        self.assertEqual(findings[0].severity, "high")
+
+    def test_terrascan_project_suppression_is_a_blocking_finding(self) -> None:
+        payload = {
+            "results": {
+                "scan_summary": {
+                    "file/folder": ".",
+                    "iac_type": "terraform",
+                    "policies_validated": 10,
+                    "violated_policies": 0,
+                    "low": 0,
+                    "medium": 0,
+                    "high": 0,
+                },
+                "violations": None,
+                "skipped_violations": [{"rule_id": "AC_AWS_0214", "file": "main.tf", "line": 1}],
+            }
+        }
+        findings = _parse_terrascan(payload, Path("/workspace"))
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].category, "policy-suppression")
+        self.assertEqual(findings[0].severity, "high")
+
+    def test_terrascan_rejects_projection_source_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "source"
+            raw = Path(temp) / "raw"
+            target.mkdir()
+            raw.mkdir()
+            outside = Path(temp) / "outside.tf"
+            outside.write_text('resource "null_resource" "outside" {}\n', encoding="utf-8")
+            try:
+                (target / "main.tf").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"Symbolic links are unavailable in this environment: {error}")
+
+            result = _run_terrascan(target, raw, ["main.tf"], ["main.tf"])
+
+            self.assertEqual(result.status, "error")
+            self.assertIn("symbolic link", result.error or "")
+
+    def test_terrascan_rejects_untrusted_or_malformed_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "source"
+            raw = Path(temp) / "raw"
+            target.mkdir()
+            raw.mkdir()
+            (target / "main.tf").write_text('resource "aws_s3_bucket" "example" {}\n', encoding="utf-8")
+
+            def run_case(payload_factory: Callable[[Path], object]) -> ToolResult:
+                def fake_run(name: str, command: list[str], output_dir: Path, **kwargs: object) -> ToolResult:
+                    projection = Path(command[command.index("--iac-dir") + 1])
+                    stdout = output_dir / "terrascan.stdout.log"
+                    payload = payload_factory(projection)
+                    stdout.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+                    return ToolResult(
+                        name=name,
+                        status="findings",
+                        exit_code=3,
+                        output_path=str(kwargs["output_path"]),
+                        stdout_path=str(stdout),
+                    )
+
+                with patch("quality_sidecar.tools.run_command", side_effect=fake_run):
+                    return _run_terrascan(target, raw, ["main.tf"], ["main.tf"])
+
+            def report(
+                projection: Path,
+                *,
+                scan_target: str | None = None,
+                file_value: str = "main.tf",
+                scan_errors: list[dict] | None = None,
+            ) -> dict:
+                return {
+                    "results": {
+                        "scan_summary": {
+                            "file/folder": scan_target or str(projection),
+                            "iac_type": "terraform",
+                            "policies_validated": 1,
+                            "violated_policies": 1,
+                            "low": 0,
+                            "medium": 0,
+                            "high": 1,
+                        },
+                        "violations": [{"rule_id": "AC_AWS_0207", "file": file_value}],
+                        "skipped_violations": None,
+                        "scan_errors": scan_errors,
+                    }
+                }
+
+            cases: dict[str, Callable[[Path], object]] = {
+                "path traversal": lambda projection: report(projection, file_value="../escape.tf"),
+                "wrong scan target": lambda projection: report(projection, scan_target=str(target)),
+                "partial scan error": lambda projection: report(
+                    projection,
+                    scan_errors=[{"iac_type": "terraform", "directory": ".", "errMsg": "partial scan"}],
+                ),
+                "malformed JSON": lambda _projection: "{not-json",
+            }
+            for label, payload_factory in cases.items():
+                with self.subTest(label=label):
+                    result = run_case(payload_factory)
+                    self.assertEqual(result.status, "error")
+                    self.assertFalse(result.summary["evidenceValid"])
+                    self.assertIn("Invalid analyzer evidence", result.error or "")
 
     def test_baked_flavor_wins_over_runtime_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
