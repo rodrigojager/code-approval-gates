@@ -438,6 +438,13 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         "FORMATTERS_DISABLE_ERRORS": "false",
         "FILTER_REGEX_EXCLUDE": _megalinter_exclude_regex(root),
         "MEGALINTER_CONFIG": MEGALINTER_TRUSTED_CONFIG,
+        # DevSkim is a project-mode analyzer and scans the workspace directly,
+        # so MegaLinter's file-list filter does not protect it from reports
+        # produced concurrently by other analyzers. Keep gate-owned output out
+        # of scope to prevent findings against the generated CycloneDX SBOM.
+        "REPOSITORY_DEVSKIM_ARGUMENTS": (
+            "--ignore-globs **/.git/**,**/megalinter-reports/**,**/.quality/**"
+        ),
         # MegaLinter's activation probe prepends the workspace even when a
         # rules path is absolute. A generated relative path reaches the same
         # root-owned config from arbitrary GitLab checkout locations.

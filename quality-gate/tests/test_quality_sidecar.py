@@ -335,6 +335,10 @@ class QualityPolicyTests(unittest.TestCase):
                 self.assertEqual(eslint_rules_path, MEGALINTER_CONFIG_DIR)
             self.assertIn("--config", environment["JAVASCRIPT_ES_ARGUMENTS"])
             self.assertIn(str(MEGALINTER_CONFIG_DIR / "eslint.config.mjs"), environment["JAVASCRIPT_ES_ARGUMENTS"])
+            self.assertEqual(
+                environment["REPOSITORY_DEVSKIM_ARGUMENTS"],
+                "--ignore-globs **/.git/**,**/megalinter-reports/**,**/.quality/**",
+            )
             exclusion = re.compile(environment["FILTER_REGEX_EXCLUDE"])
             self.assertIsNone(exclusion.search((target / "sample.js").as_posix()))
             self.assertIsNotNone(exclusion.search((target / "src" / "tmp" / "artifact.js").as_posix()))

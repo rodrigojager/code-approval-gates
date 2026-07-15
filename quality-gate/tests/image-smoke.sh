@@ -312,6 +312,12 @@ run_full_clean_smoke() {
       "</Project>" > "$target/Smoke.csproj"
     printf "%s\n" "Console.WriteLine(\"Quality gate smoke.\");" > "$target/Program.cs"
 
+    # DevSkim runs in project mode while other MegaLinter analyzers write
+    # reports concurrently. This canary must stay ignored as gate-owned output.
+    mkdir -p "$target/.quality"
+    printf "%s\n" "http://cyclonedx.org/schema/bom-1.7.schema.json" \
+      > "$target/.quality/devskim-ignore-canary.txt"
+
     set +e
     /opt/quality-sidecar/entrypoint.sh check "$target" \
       --mode full \
