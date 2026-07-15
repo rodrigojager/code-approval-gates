@@ -60,7 +60,7 @@ Lacunas encontradas nas implementações de origem e tratadas ou mantidas como p
 | Findings do MegaLinter afetarem a decisão | CONCLUÍDO localmente | full-clean aprova; full-finding rejeita nas duas flavors |
 | Corrigir path da configuração MegaLinter | CONCLUÍDO localmente | configs ESLint/TFLint root-owned e full smokes reais |
 | Neutralizar configs/suppressions por analisador e risco C#/MSBuild | PENDENTE | inventário por linter; piloto continua advisory |
-| Corrigir clean-clone verify/bootstrap | EM VALIDAÇÃO | CI a partir de checkout limpo |
+| Corrigir clean-clone verify/bootstrap | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | clone local sem hardlinks + CI remoto |
 | Filtrar `diffBytes` pelos arquivos selecionados | CONCLUÍDO no runtime GitLab | `_diff_metrics` usa pathspec selecionado |
 | Não contar suporte como arquivo alterado | CONCLUÍDO | manifesto separa `selectedFiles`/`supportFiles`; testes de budgets |
 
@@ -120,7 +120,7 @@ Lacunas encontradas nas implementações de origem e tratadas ou mantidas como p
 | Item planejado | Estado | Evidência/arquivo |
 | --- | --- | --- |
 | Workflows relevantes na raiz `.github/workflows` | CONCLUÍDO localmente; EM VALIDAÇÃO no GitHub | `actionlint` verde; reconhecimento remoto pendente |
-| Clean clone em Ubuntu e Windows | EM VALIDAÇÃO | jobs verdes |
+| Clean clone em Ubuntu e Windows | CONCLUÍDO em clone local Windows; EM VALIDAÇÃO no CI | clone novo ficou limpo; jobs Ubuntu/Windows pendentes |
 | Suites root, Quality Node/Python e Semantic | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | `npm run verify` final |
 | `npm pack --dry-run` | CONCLUÍDO localmente | root, Semantic e Quality no verify final |
 | Build generic + dotnetweb | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | builds locais finais das duas flavors |
@@ -194,6 +194,7 @@ A iniciativa só está concluída quando:
 | Verificação | Resultado |
 | --- | --- |
 | `npm run verify` na árvore final | root 38/38; Semantic 23/23; Quality Node 29/29; Quality Python 92/92; três packs secos aprovados |
+| clone novo `--no-hardlinks` da branch + `npm run verify` | mesmas quatro suítes/packs aprovados; `git status` permaneceu limpo; clone temporário removido com path validado |
 | `python -W error::ResourceWarning -m unittest discover -s quality-gate/tests -p "test_*.py"` | 92/92 testes aprovados |
 | `test_quality_ci.py` dentro da suíte | 21/21: ref governada, spoof de env, policy externa, source limpa por `git archive`, symlink/gitlink, flags/waiver recusados, suporte .NET e sanitização |
 | Builds/smokes `dotnetweb` | imagem final 2.644.937.311 bytes; quick/tool-error/full-clean/full-finding aprovados; clean 7/7 tools, 0 findings |
