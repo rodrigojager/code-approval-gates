@@ -23,6 +23,17 @@ function Invoke-Native {
 New-Item -ItemType Directory -Path $verifyDir | Out-Null
 
 try {
+  # Root tests exercise `doctor semantic`, which intentionally verifies the
+  # compiled semantic wrapper. Bootstrap that workspace first so a pristine
+  # checkout is tested in the same valid state as an installed checkout.
+  Push-Location (Join-Path $root "semantic-gate")
+  try {
+    Invoke-Native npm install --workspaces=false
+    Invoke-Native npm run build --workspaces=false
+  } finally {
+    Pop-Location
+  }
+
   Push-Location $root
   try {
     Invoke-Native node --check "bin/code-approval-gates.js"
@@ -35,7 +46,6 @@ try {
 
   Push-Location (Join-Path $root "semantic-gate")
   try {
-    Invoke-Native npm install --workspaces=false
     Invoke-Native npm run test:build --workspaces=false
     Invoke-Native npm run pack:dry-run --workspaces=false
   } finally {

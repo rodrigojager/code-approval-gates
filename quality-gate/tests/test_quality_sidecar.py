@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,15 +16,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "sidecar"))
 
 from quality_sidecar.detectors import detect_iac_files  # noqa: E402
+from quality_sidecar.findings import Finding  # noqa: E402
 from quality_sidecar.policy import evaluate_policy  # noqa: E402
+from quality_sidecar.report import build_report, write_markdown_report  # noqa: E402
 from quality_sidecar.tools import (  # noqa: E402
+    MEGALINTER_CONFIG_DIR,
     ToolResult,
+    _parse_checkov,
+    _quality_gate_flavor,
     _parse_megalinter,
+    _parse_trivy,
     _prepare_raw_dir,
+    _run_checkov,
     _run_gitleaks,
+    _run_jscpd,
     _run_megalinter,
+    _run_osv_scanner,
     _run_semgrep,
     _run_trivy,
+    parse_tool_findings,
+    run_command,
+    run_external_tools,
     run_project_tests,
 )
 
@@ -209,6 +222,7 @@ class QualityPolicyTests(unittest.TestCase):
         raw = target / "raw"
         logs = raw / "megalinter" / "linters_logs"
         logs.mkdir(parents=True)
+        (raw / "megalinter" / "mega-linter.log").write_text("MegaLinter fixture\n", encoding="utf-8")
         (logs / "YAML_YAMLLINT-ERROR.log").write_text(content, encoding="utf-8")
         return target, raw
 
@@ -275,15 +289,18 @@ class QualityPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             target, raw = self.create_megalinter_error_log(temp, "invalid YAML\n")
 
-            with patch(
-                "quality_sidecar.tools.run_command",
-                return_value=ToolResult(
-                    name="megalinter",
-                    status="ok",
-                    exit_code=1,
-                    output_path=str(raw / "megalinter"),
-                ),
-            ) as run_command_mock:
+            with (
+                patch.dict(os.environ, {"QUALITY_GATE_FLAVOR": "dotnetweb"}),
+                patch(
+                    "quality_sidecar.tools.run_command",
+                    return_value=ToolResult(
+                        name="megalinter",
+                        status="ok",
+                        exit_code=1,
+                        output_path=str(raw / "megalinter"),
+                    ),
+                ) as run_command_mock,
+            ):
                 result = _run_megalinter(target, raw)
 
             findings = _parse_megalinter(result)
@@ -306,6 +323,105 @@ class QualityPolicyTests(unittest.TestCase):
             self.assertEqual(policy.exit_code, 1)
             self.assertIn("CSHARP_DOTNET_FORMAT", environment["ENABLE_LINTERS"])
             self.assertNotIn("REPOSITORY_TRIVY", environment["ENABLE_LINTERS"])
+            eslint_rules_path = Path(environment["JAVASCRIPT_ES_RULES_PATH"])
+            if target.drive.casefold() == MEGALINTER_CONFIG_DIR.drive.casefold():
+                self.assertFalse(eslint_rules_path.is_absolute())
+                self.assertEqual((target / eslint_rules_path).resolve(), MEGALINTER_CONFIG_DIR)
+            else:
+                self.assertEqual(eslint_rules_path, MEGALINTER_CONFIG_DIR)
+            self.assertIn("--config", environment["JAVASCRIPT_ES_ARGUMENTS"])
+            self.assertIn(str(MEGALINTER_CONFIG_DIR / "eslint.config.mjs"), environment["JAVASCRIPT_ES_ARGUMENTS"])
+            exclusion = re.compile(environment["FILTER_REGEX_EXCLUDE"])
+            self.assertIsNone(exclusion.search((target / "sample.js").as_posix()))
+            self.assertIsNotNone(exclusion.search((target / "src" / "tmp" / "artifact.js").as_posix()))
+            trusted_config = Path(environment["MEGALINTER_CONFIG"])
+            self.assertTrue(trusted_config.is_absolute())
+            self.assertEqual(trusted_config.name, "megalinter-ci.yml")
+            self.assertTrue(trusted_config.is_file())
+            self.assertIn("--no-inline-config", environment["JAVASCRIPT_ES_ARGUMENTS"])
+            self.assertEqual(environment["TERRAFORM_TFLINT_RULES_PATH"], str(MEGALINTER_CONFIG_DIR))
+            self.assertEqual(environment["TERRAFORM_TFLINT_CONFIG_FILE"], "tflint-ci.hcl")
+
+    def test_generic_flavor_preserves_megalinter_language_auto_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+
+            with (
+                patch.dict(os.environ, {"QUALITY_GATE_FLAVOR": "generic"}),
+                patch(
+                    "quality_sidecar.tools.run_command",
+                    return_value=ToolResult(name="megalinter", status="ok", exit_code=0),
+                ) as run_command_mock,
+            ):
+                _run_megalinter(target, raw)
+
+            environment = run_command_mock.call_args.kwargs["env"]
+            self.assertNotIn("ENABLE_LINTERS", environment)
+            self.assertIn("REPOSITORY_TRIVY", environment["DISABLE_LINTERS"])
+            self.assertIn("REPOSITORY_SEMGREP", environment["DISABLE_LINTERS"])
+            self.assertIn("COPYPASTE_JSCPD", environment["DISABLE_LINTERS"])
+            self.assertIn("REPOSITORY_GIT_DIFF", environment["DISABLE_LINTERS"])
+
+    def test_baked_flavor_wins_over_runtime_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            baked_flavor = Path(temp) / "quality-gate-flavor"
+            baked_flavor.write_text("dotnetweb\n", encoding="utf-8")
+
+            with (
+                patch("quality_sidecar.tools.QUALITY_GATE_FLAVOR_FILE", baked_flavor),
+                patch.dict(os.environ, {"QUALITY_GATE_FLAVOR": "generic"}),
+            ):
+                self.assertEqual(_quality_gate_flavor(), "dotnetweb")
+
+    def test_source_checkout_flavor_fallback_rejects_unknown_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            missing_flavor = Path(temp) / "missing-flavor"
+
+            with (
+                patch("quality_sidecar.tools.QUALITY_GATE_FLAVOR_FILE", missing_flavor),
+                patch.dict(os.environ, {"QUALITY_GATE_FLAVOR": "untrusted"}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Unsupported quality-gate flavor"):
+                    _quality_gate_flavor()
+
+    def test_external_tools_do_not_run_project_tests_without_explicit_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            reports = target / "reports"
+
+            with (
+                patch(
+                    "quality_sidecar.tools.run_command",
+                    side_effect=lambda name, *_args, **_kwargs: ToolResult(name=name, status="ok", exit_code=0),
+                ),
+                patch("quality_sidecar.tools._run_project_tests") as project_tests_mock,
+            ):
+                results, _ = run_external_tools(target, reports, "full")
+
+            project_tests_mock.assert_not_called()
+            self.assertNotIn("project-tests", {result.name for result in results})
+
+    def test_external_tools_run_project_tests_after_explicit_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            reports = target / "reports"
+
+            with (
+                patch(
+                    "quality_sidecar.tools.run_command",
+                    side_effect=lambda name, *_args, **_kwargs: ToolResult(name=name, status="ok", exit_code=0),
+                ),
+                patch(
+                    "quality_sidecar.tools._run_project_tests",
+                    return_value=(ToolResult(name="project-tests", status="ok"), []),
+                ) as project_tests_mock,
+            ):
+                results, _ = run_external_tools(target, reports, "full", run_project_tests=True)
+
+            project_tests_mock.assert_called_once()
+            self.assertIn("project-tests", {result.name for result in results})
 
     def test_megalinter_fatal_analyzer_error_is_operational_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -328,6 +444,46 @@ class QualityPolicyTests(unittest.TestCase):
             self.assertEqual(result.status, "error")
             self.assertIn("YAML_YAMLLINT", result.summary["fatalAnalyzers"])
 
+    def test_megalinter_plugin_initialization_failure_is_operational_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target, raw = self.create_megalinter_error_log(
+                temp,
+                'Failed to initialize plugins; Plugin "azurerm" not found.\n',
+            )
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(
+                    name="megalinter",
+                    status="ok",
+                    exit_code=1,
+                    output_path=str(raw / "megalinter"),
+                ),
+            ):
+                result = _run_megalinter(target, raw)
+
+            self.assertEqual(result.status, "error")
+            self.assertIn("YAML_YAMLLINT", result.summary["fatalAnalyzers"])
+
+    def test_megalinter_exit_zero_without_execution_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(
+                    name="megalinter",
+                    status="ok",
+                    exit_code=0,
+                    output_path=str(raw / "megalinter"),
+                ),
+            ):
+                result = _run_megalinter(target, raw)
+
+            self.assertEqual(result.status, "error")
+            self.assertFalse(result.summary["evidenceValid"])
+
     def test_trivy_skips_gate_reports_and_dependency_directories(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
@@ -338,14 +494,23 @@ class QualityPolicyTests(unittest.TestCase):
                 "quality_sidecar.tools.run_command",
                 return_value=ToolResult(name="trivy", status="ok", exit_code=0),
             ) as run_command_mock:
-                _run_trivy(target, raw, enable_secrets=True)
+                result = _run_trivy(target, raw, enable_secrets=True)
 
             command = run_command_mock.call_args.args[1]
             self.assertIn("vuln,misconfig,secret", command)
+            self.assertIn("--config", command)
+            self.assertEqual(Path(command[command.index("--config") + 1]).name, "trivy-ci.yaml")
+            self.assertEqual(Path(command[command.index("--ignorefile") + 1]).name, "trivyignore-ci")
+            self.assertIn("--show-suppressed", command)
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
             for directory in (".git", ".quality", "node_modules", "vendor"):
                 expected = str(target / directory)
                 index = command.index(expected)
                 self.assertEqual(command[index - 1], "--skip-dirs")
+            self.assertEqual(
+                result.summary["analysisInput"]["source"],
+                "ghcr.io/aquasecurity/trivy-db",
+            )
 
     def test_gitleaks_redacts_secrets_in_raw_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -361,6 +526,16 @@ class QualityPolicyTests(unittest.TestCase):
 
             command = run_command_mock.call_args.args[1]
             self.assertIn("--redact=100", command)
+            self.assertIn("dir", command)
+            self.assertNotIn("detect", command)
+            self.assertEqual(command[-1], str(target))
+            self.assertEqual(Path(command[command.index("--config") + 1]).name, "gitleaks-ci.toml")
+            self.assertEqual(
+                Path(command[command.index("--gitleaks-ignore-path") + 1]).name,
+                "gitleaksignore-ci",
+            )
+            self.assertIn("--ignore-gitleaks-allow", command)
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
 
     def test_semgrep_skips_gate_outputs_and_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -372,12 +547,258 @@ class QualityPolicyTests(unittest.TestCase):
                 "quality_sidecar.tools.run_command",
                 return_value=ToolResult(name="semgrep", status="ok", exit_code=0),
             ) as run_command_mock:
-                _run_semgrep(target, raw)
+                result = _run_semgrep(target, raw)
 
             command = run_command_mock.call_args.args[1]
             for directory in (".git", ".quality", "node_modules"):
                 index = command.index(directory)
                 self.assertEqual(command[index - 1], "--exclude")
+
+            self.assertIn("--no-git-ignore", command)
+            self.assertIn("--x-ignore-semgrepignore-files", command)
+            self.assertIn("--disable-nosem", command)
+            self.assertIn("--config=p/default", command)
+            self.assertIn("--metrics=off", command)
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
+
+            self.assertEqual(result.summary["analysisInput"]["source"], "semgrep-registry:p/default")
+            self.assertFalse(result.summary["analysisInput"]["pinned"])
+            self.assertTrue(result.summary["analysisInput"]["networkRequired"])
+
+    def test_osv_scanner_uses_the_v2_source_scan_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="osv-scanner", status="ok", exit_code=0),
+            ) as run_command_mock:
+                result = _run_osv_scanner(target, raw)
+
+            command = run_command_mock.call_args.args[1]
+            self.assertEqual(command[:3], ["osv-scanner", "scan", "source"])
+            self.assertIn("--recursive", command)
+            self.assertIn("--no-ignore", command)
+            self.assertIn("--allow-no-lockfiles", command)
+            self.assertEqual(Path(command[command.index("--config") + 1]).name, "osv-scanner-ci.toml")
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
+            self.assertEqual(result.summary["analysisInput"]["source"], "osv.dev")
+
+    def test_checkov_uses_trusted_config_and_blocks_inline_suppressions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="checkov", status="ok", exit_code=0),
+            ) as run_command_mock:
+                _run_checkov(target, raw, ["main.tf"])
+
+            command = run_command_mock.call_args.args[1]
+            self.assertEqual(Path(command[command.index("--config-file") + 1]).name, "checkov-ci.yml")
+            self.assertIn(f"--directory={target}", command)
+            self.assertIn("--skip-download", command)
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
+
+            findings = _parse_checkov(
+                {
+                    "results": {
+                        "skipped_checks": [
+                            {
+                                "check_id": "CKV_TEST_1",
+                                "file_path": "/main.tf",
+                                "file_line_range": [4, 4],
+                                "suppress_comment": "checkov:skip=CKV_TEST_1",
+                            }
+                        ]
+                    }
+                },
+                target,
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].category, "policy-suppression")
+            self.assertEqual(findings[0].severity, "high")
+
+    def test_trivy_suppressed_misconfiguration_remains_blocking(self) -> None:
+        findings = _parse_trivy(
+            {
+                "Results": [
+                    {
+                        "Target": "main.tf",
+                        "Misconfigurations": [
+                            {"ID": "AVD-TEST-1", "Severity": "LOW", "Status": "EXCEPTION"}
+                        ],
+                    }
+                ]
+            },
+            Path("/workspace"),
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].category, "policy-suppression")
+        self.assertEqual(findings[0].severity, "high")
+
+    def test_jscpd_uses_trusted_config_outside_the_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            raw = target / "raw"
+            raw.mkdir()
+            with patch(
+                "quality_sidecar.tools.run_command",
+                return_value=ToolResult(name="jscpd", status="ok", exit_code=0),
+            ) as run_command_mock:
+                _run_jscpd(target, raw)
+
+            command = run_command_mock.call_args.args[1]
+            self.assertEqual(Path(command[command.index("--config") + 1]).name, "jscpd-ci.json")
+            self.assertIn("--no-gitignore", command)
+            ignore_value = command[command.index("--ignore") + 1]
+            self.assertIn("**/obj/**", ignore_value)
+            self.assertIn("**/bin/**", ignore_value)
+            self.assertEqual(command[-1], str(target))
+            self.assertEqual(run_command_mock.call_args.kwargs["cwd"], MEGALINTER_CONFIG_DIR)
+
+    def test_analyzer_subprocess_environment_drops_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ,
+            {
+                "CI_JOB_TOKEN": "synthetic-job-token",
+                "AWS_SECRET_ACCESS_KEY": "synthetic-secret",
+                "SONAR_TOKEN": "synthetic-sonar-token",
+            },
+            clear=False,
+        ), patch("quality_sidecar.tools._resolve_command", return_value=sys.executable), patch(
+            "quality_sidecar.tools.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ) as subprocess_mock:
+            output = Path(temp)
+            run_command("fixture", ["python", "--version"], output, cwd=output)
+
+        environment = subprocess_mock.call_args.kwargs["env"]
+        self.assertNotIn("CI_JOB_TOKEN", environment)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+        self.assertNotIn("SONAR_TOKEN", environment)
+        self.assertIn("PATH", {name.upper() for name in environment})
+
+    def test_missing_malformed_or_wrong_shape_analyzer_evidence_fails_closed(self) -> None:
+        cases = (
+            ("semgrep", None, None),
+            ("gitleaks", "not-json", None),
+            ("trivy", "{}", None),
+            ("checkov", "[]", None),
+            (
+                "checkov",
+                '{"passed":0,"failed":1,"skipped":0,"parsing_errors":0,"resource_count":1,"checkov_version":"3.3.8"}',
+                None,
+            ),
+            (
+                "checkov",
+                '{"passed":0,"failed":0,"skipped":0,"parsing_errors":0,"resource_count":0,"checkov_version":"3.3.8","unexpected":true}',
+                None,
+            ),
+            ("osv-scanner", '{"results":{}}', None),
+            ("jscpd", '{"statistics":{}}', None),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index, (name, content, _unused) in enumerate(cases):
+                with self.subTest(tool=name):
+                    output = root / f"evidence-{index}.json"
+                    if content is not None:
+                        output.write_text(content, encoding="utf-8")
+                    result = ToolResult(name=name, status="ok", exit_code=0, output_path=str(output))
+
+                    findings = parse_tool_findings(name, result, root)
+
+                    self.assertEqual(findings, [])
+                    self.assertEqual(result.status, "error")
+                    self.assertFalse(result.summary["evidenceValid"])
+
+    def test_valid_empty_analyzer_reports_are_accepted(self) -> None:
+        reports = {
+            "semgrep": {"results": []},
+            "gitleaks": [],
+            "trivy": {"Results": []},
+            "checkov": {"results": {"failed_checks": [], "skipped_checks": []}},
+            "checkov-official-empty": {
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "parsing_errors": 0,
+                "resource_count": 0,
+                "checkov_version": "3.3.8",
+            },
+            "osv-scanner": {"results": []},
+            "jscpd": {"duplicates": []},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index, (name, payload) in enumerate(reports.items()):
+                with self.subTest(tool=name):
+                    output = root / f"valid-{index}.json"
+                    output.write_text(json.dumps(payload), encoding="utf-8")
+                    tool_name = "checkov" if name == "checkov-official-empty" else name
+                    result = ToolResult(name=tool_name, status="ok", exit_code=0, output_path=str(output))
+
+                    findings = parse_tool_findings(tool_name, result, root)
+
+                    self.assertEqual(findings, [])
+                    self.assertEqual(result.status, "ok")
+                    self.assertTrue(result.summary["evidenceValid"])
+
+    def test_normalized_reports_hide_runner_paths_and_escape_markdown_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "projection" / "workspace"
+            target.mkdir(parents=True)
+            outside = Path(temp) / "original-checkout" / ".quality" / "raw" / "semgrep.json"
+            tool = ToolResult(
+                name="semgrep",
+                status="error",
+                command=["/opt/venvs/semgrep/bin/semgrep", "scan", str(target)],
+                output_path=str(outside),
+                stdout_path=str(outside.with_suffix(".stdout.log")),
+                stderr_path=str(outside.with_suffix(".stderr.log")),
+                error=f"unable to read {outside}",
+            )
+            finding = Finding(
+                tool="fixture",
+                rule="unsafe|rule",
+                severity="high",
+                category="test",
+                path="src/file.py\n| forged | row |",
+                message="line one\n| forged | table | row |",
+            )
+            policy = SimpleNamespace(
+                status="NEEDS_CHANGES",
+                exit_code=2,
+                score=0,
+                threshold=90,
+                counts={},
+                reasons=[],
+                tool_errors=["semgrep"],
+            )
+
+            report = build_report(
+                target=target,
+                profile="standard",
+                mode="full",
+                policy=policy,
+                stack={},
+                findings=[finding],
+                tool_results=[tool],
+                metrics={},
+            )
+            markdown = write_markdown_report(report, Path(temp) / "report").read_text(encoding="utf-8")
+
+            serialized = json.dumps(report)
+            self.assertEqual(report["target"], ".")
+            self.assertNotIn(str(Path(temp)), serialized)
+            self.assertEqual(report["tools"][0]["output_path"], "semgrep.json")
+            self.assertNotIn("\n| forged |", markdown)
+            self.assertIn("\\| forged \\|", markdown)
 
     def test_project_tests_skip_when_scoped_checkout_omits_npm_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -5,6 +5,8 @@ name: Quality Gate container
   pull_request:
     paths:
       - ".github/workflows/quality-gate-image.yml"
+      - "package.json"
+      - "package-lock.json"
       - "docs/plano-gitlab-quality-gate.md"
       - "docs/proximos-passos-publicacao-segura.md"
       - "examples/ci/gitlab-quality-gate.yml"
@@ -17,68 +19,163 @@ name: Quality Gate container
 permissions:
   contents: read
 
+concurrency:
+  group: quality-gate-container-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   IMAGE_NAME: ghcr.io/rodrigojager/code-approval-quality-gate
+  MEGALINTER_GENERIC_IMAGE: ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:248e30b43bdfa7ce941fd5e410159da4d69716c68c48a459b08d1760c4625ef5
+  MEGALINTER_DOTNETWEB_IMAGE: ghcr.io/oxsecurity/megalinter-dotnetweb:v9.6.0@sha256:f7a17985de07b494e09952d5689f3cf978a270bb46ca5c4d5e1a05e262977a84
 
 jobs:
-  validate:
-    name: Validate image build
-    if: github.event_name != 'push'
+  release-guard:
+    name: Validate release source
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Require strict stable SemVer, aligned versions, and the tip of main
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^quality-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          release_version="${RELEASE_TAG#quality-v}"
+          root_version="$(node -p "require('./package.json').version")"
+          quality_version="$(node -p "require('./quality-gate/package.json').version")"
+          python_version="$(python3 -c 'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("quality-gate/pyproject.toml").read_text())["project"]["version"])')"
+          init_version="$(python3 -c 'import ast,pathlib; tree=ast.parse(pathlib.Path("quality-gate/sidecar/quality_sidecar/__init__.py").read_text()); print(next(node.value.value for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets) and isinstance(node.value, ast.Constant)))')"
+          for declared_version in "$root_version" "$quality_version" "$python_version" "$init_version"; do
+            if [[ "$declared_version" != "$release_version" ]]; then
+              echo "Release tag version $release_version does not match declared version $declared_version" >&2
+              exit 1
+            fi
+          done
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+            echo "Release tag must point to the current approved main tip ($main_sha), got $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+  validate:
+    name: Validate ${{ matrix.flavor }} image
+    needs: release-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: generic
+            base_image: ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:248e30b43bdfa7ce941fd5e410159da4d69716c68c48a459b08d1760c4625ef5
+          - flavor: dotnetweb
+            base_image: ghcr.io/oxsecurity/megalinter-dotnetweb:v9.6.0@sha256:f7a17985de07b494e09952d5689f3cf978a270bb46ca5c4d5e1a05e262977a84
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ./quality-gate
           file: ./quality-gate/Dockerfile
           platforms: linux/amd64
           load: true
           push: false
-          tags: code-approval-quality-gate:pr-test
+          tags: code-approval-quality-gate:${{ matrix.flavor }}-test
+          build-args: |
+            MEGALINTER_IMAGE=${{ matrix.base_image }}
+            QUALITY_GATE_FLAVOR=${{ matrix.flavor }}
+          cache-from: type=gha,scope=quality-gate-${{ matrix.flavor }}
+          cache-to: type=gha,mode=max,scope=quality-gate-${{ matrix.flavor }}
 
-      - name: Smoke test image runtime and report writes
+      - name: Record local image size
+        shell: bash
+        env:
+          LOCAL_IMAGE: code-approval-quality-gate:${{ matrix.flavor }}-test
+          IMAGE_FLAVOR: ${{ matrix.flavor }}
+        run: |
+          bytes="$(docker image inspect --format '{{.Size}}' "$LOCAL_IMAGE")"
+          echo "$IMAGE_FLAVOR image size: $(numfmt --to=iec-i --suffix=B "$bytes")" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release duplicated BuildKit cache from runner disk
+        shell: bash
+        run: docker buildx prune --all --force
+
+      - name: Verify toolchain and non-root quick execution
+        shell: bash
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:${{ matrix.flavor }}-test quick
+
+      - name: Verify operational tool-error path
+        if: matrix.flavor == 'dotnetweb'
+        shell: bash
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:dotnetweb-test tool-error
+
+      - name: Verify official clean analyzer evidence
+        shell: bash
+        timeout-minutes: 45
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:${{ matrix.flavor }}-test full-clean
+
+      - name: Verify full toolchain produces a blocking finding
+        shell: bash
+        timeout-minutes: 45
+        run: bash quality-gate/tests/image-smoke.sh code-approval-quality-gate:${{ matrix.flavor }}-test full-finding
+
+      - name: Record network-backed analysis inputs
         shell: bash
         run: |
-          smoke_dir="$RUNNER_TEMP/quality-gate-smoke"
-          mkdir -p "$smoke_dir"
-          printf '%s\n' 'const answer = 42;' > "$smoke_dir/sample.js"
-          docker run --rm \
-            --user 0 \
-            --mount "type=bind,source=$smoke_dir,target=/workspace" \
-            code-approval-quality-gate:pr-test \
-            check /workspace \
-              --mode quick \
-              --format json,md \
-              --output /workspace/.quality/reports
-          test -s "$smoke_dir/.quality/reports/quality-report.json"
-          test -s "$smoke_dir/.quality/reports/quality-report.md"
+          echo "### Runtime analysis inputs" >> "$GITHUB_STEP_SUMMARY"
+          echo "Semgrep p/default rules, the Trivy vulnerability database, and OSV data are fetched at scan time." >> "$GITHUB_STEP_SUMMARY"
+          echo "Their sources are reported by the sidecar, but their contents are not digest-pinned yet; CI runners require controlled egress/cache." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan image for fixed critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: code-approval-quality-gate:${{ matrix.flavor }}-test
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
 
   publish:
-    name: Publish versioned image
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/quality-v')
+    name: Publish versioned dotnetweb image
+    if: github.event_name == 'push'
+    needs:
+      - release-guard
+      - validate
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Verify tagged commit belongs to main
-        shell: bash
-        run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -86,18 +183,21 @@ jobs:
 
       - name: Generate image metadata
         id: metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
+          labels: |
+            io.code-approval.quality-gate.flavor=dotnetweb
+            io.code-approval.quality-gate.platform=linux/amd64
           tags: |
-            type=match,pattern=quality-v(.*),group=1
-            type=sha,prefix=sha-
+            type=match,pattern=quality-v(.*),group=1,suffix=-dotnetweb
+            type=sha,prefix=sha-,suffix=-dotnetweb
 
-      - name: Build and publish image
+      - name: Build and publish dotnetweb image
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ./quality-gate
           file: ./quality-gate/Dockerfile
@@ -105,6 +205,11 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            MEGALINTER_IMAGE=${{ env.MEGALINTER_DOTNETWEB_IMAGE }}
+            QUALITY_GATE_FLAVOR=dotnetweb
+          cache-from: type=gha,scope=quality-gate-dotnetweb
+          cache-to: type=gha,mode=max,scope=quality-gate-dotnetweb
           provenance: mode=max
           sbom: true
 
@@ -112,4 +217,5 @@ jobs:
         shell: bash
         run: |
           echo "Image: ${{ env.IMAGE_NAME }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Flavor: dotnetweb" >> "$GITHUB_STEP_SUMMARY"
           echo "Digest: ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

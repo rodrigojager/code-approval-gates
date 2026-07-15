@@ -7,6 +7,7 @@ from typing import Any
 
 from .detectors import is_probably_text, iter_project_files, relative_path
 from .findings import Finding
+from .provenance import sha256_file
 
 
 DEFAULT_POLICY_FILE = ".quality-gate-policy.json"
@@ -58,11 +59,17 @@ def _under_root(root: Path, value: str | Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def load_quality_policy(root: Path, policy_file: str | None) -> tuple[dict[str, Any], str | None]:
+def load_quality_policy(
+    root: Path,
+    policy_file: str | None,
+    *,
+    required: bool = False,
+    expected_sha256: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
     explicit = bool(policy_file)
     path = _under_root(root, policy_file or DEFAULT_POLICY_FILE)
     if not path.exists():
-        if explicit:
+        if explicit or required:
             raise ValueError(f"Policy file not found: {path}")
         return {}, None
     try:
@@ -71,9 +78,74 @@ def load_quality_policy(root: Path, policy_file: str | None) -> tuple[dict[str, 
         raise ValueError(f"Invalid quality policy {path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid quality policy {path}: root value must be an object")
-    if payload.get("schemaVersion", 1) != 1:
+    if payload.get("schemaVersion") != 1:
         raise ValueError(f"Unsupported quality policy schemaVersion: {payload.get('schemaVersion')}")
-    return payload, relative_path(path, root)
+    _validate_policy_keys(payload)
+    if expected_sha256:
+        expected = expected_sha256.removeprefix("sha256:").strip().lower()
+        if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+            raise ValueError("Policy SHA-256 must be exactly 64 hexadecimal characters")
+        actual = sha256_file(path)
+        if actual != expected:
+            raise ValueError(f"Policy SHA-256 mismatch: expected {expected}, got {actual}")
+    resolved_path = path.resolve()
+    resolved_root = root.resolve()
+    try:
+        report_path = resolved_path.relative_to(resolved_root).as_posix()
+    except ValueError:
+        # A GitLab File variable or runner-mounted corporate policy commonly
+        # lives outside the checkout. Reports need its identity and digest, not
+        # the runner's internal absolute filesystem layout.
+        report_path = resolved_path.name
+    return payload, report_path
+
+
+def _validate_policy_keys(payload: dict[str, Any]) -> None:
+    allowed_top = {
+        "schemaVersion",
+        "budgets",
+        "changeRequirements",
+        "dependencyGraph",
+        "evidence",
+        "testQuality",
+        "provenance",
+    }
+    unknown = sorted(set(payload) - allowed_top)
+    if unknown:
+        raise ValueError(f"Unknown quality policy keys: {', '.join(unknown)}")
+
+    sections = {
+        "budgets": {"enabled", *BUDGET_KEYS},
+        "dependencyGraph": {"reports", "maxFanIn", "maxFanOut", "allowCycles", "forbiddenLayerDependencies"},
+        "evidence": {"reports", "requiredMetrics"},
+        "testQuality": {"reports", "minTests", "maxSkippedTests", "maxSkippedPercent"},
+        "provenance": {"requireEvidence", "maxEvidenceAgeSeconds"},
+    }
+    for name, allowed in sections.items():
+        section = payload.get(name)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            raise ValueError(f"quality policy {name} must be an object")
+        section_unknown = sorted(set(section) - allowed)
+        if section_unknown:
+            raise ValueError(f"Unknown quality policy {name} keys: {', '.join(section_unknown)}")
+
+    change_requirements = payload.get("changeRequirements")
+    if change_requirements is not None:
+        if not isinstance(change_requirements, list):
+            raise ValueError("quality policy changeRequirements must be an array")
+        allowed_rule_keys = {
+            "id", "whenAny", "when", "requireAny", "requireAll", "unlessAny", "severity", "message"
+        }
+        for index, rule in enumerate(change_requirements):
+            if not isinstance(rule, dict):
+                raise ValueError(f"changeRequirements[{index}] must be an object")
+            unknown_rule_keys = sorted(set(rule) - allowed_rule_keys)
+            if unknown_rule_keys:
+                raise ValueError(
+                    f"Unknown quality policy changeRequirements[{index}] keys: {', '.join(unknown_rule_keys)}"
+                )
 
 
 def load_scope_manifest(root: Path, scope_manifest: str | None) -> dict[str, Any]:
@@ -88,6 +160,73 @@ def load_scope_manifest(root: Path, scope_manifest: str | None) -> dict[str, Any
         raise ValueError(f"Invalid scope manifest {path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError(f"Invalid scope manifest {path}: root value must be an object")
+    if payload.get("schemaVersion") != 1:
+        raise ValueError(f"Unsupported scope manifest schemaVersion: {payload.get('schemaVersion')}")
+    allowed_keys = {
+        "schemaVersion", "scope", "sourceCommit", "base", "head", "mergeBase",
+        "files", "fileCount", "selectedFiles", "selectedFileCount",
+        "analyzedFileCount", "supportFiles", "ignoredCount", "ignoreFiles",
+        "diff", "history", "commands", "resolution", "policy", "evidenceContract",
+        "targetBranch", "sourceMaterialization", "excludedUntrackedCount",
+    }
+    unknown = sorted(set(payload) - allowed_keys)
+    if unknown:
+        raise ValueError(f"Unknown scope manifest keys: {', '.join(unknown)}")
+    scope = str(payload.get("scope") or "")
+    if scope not in {"changed", "full", "paths"}:
+        raise ValueError("Scope manifest scope must be changed, full, or paths")
+    if "sourceMaterialization" in payload and payload["sourceMaterialization"] != "git-archive":
+        raise ValueError("Scope manifest sourceMaterialization must be git-archive")
+    if "excludedUntrackedCount" in payload and (
+        isinstance(payload["excludedUntrackedCount"], bool)
+        or not isinstance(payload["excludedUntrackedCount"], int)
+        or payload["excludedUntrackedCount"] < 0
+    ):
+        raise ValueError("Scope manifest excludedUntrackedCount must be a non-negative integer")
+    selected = payload.get("selectedFiles")
+    if not isinstance(selected, list) or not all(isinstance(item, str) for item in selected):
+        raise ValueError("Scope manifest selectedFiles must be an array of paths")
+    def validate_paths(values: list[str], field: str) -> None:
+        for value in values:
+            normalized = value.replace("\\", "/")
+            parts = normalized.split("/")
+            drive_absolute = len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":/"
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or drive_absolute
+                or ".." in parts
+                or any(ord(char) < 32 for char in normalized)
+            ):
+                raise ValueError(f"Scope manifest contains an unsafe {field} path: {value!r}")
+    validate_paths(selected, "selected")
+    for field in ("files", "supportFiles"):
+        values = payload.get(field, [])
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise ValueError(f"Scope manifest {field} must be an array of paths")
+        validate_paths(values, field)
+    if "selectedFileCount" in payload and payload["selectedFileCount"] != len(selected):
+        raise ValueError("Scope manifest selectedFileCount does not match selectedFiles")
+    files = payload.get("files", [])
+    if "fileCount" in payload and payload["fileCount"] != len(files):
+        raise ValueError("Scope manifest fileCount does not match files")
+    diff = payload.get("diff")
+    if not isinstance(diff, dict):
+        raise ValueError("Scope manifest diff must be an object")
+    allowed_diff_keys = {
+        "status", "base", "head", "fileCount", "additions", "deletions",
+        "changedLines", "patchBytes", "binaryFiles", "files", "commands",
+    }
+    unknown_diff = sorted(set(diff) - allowed_diff_keys)
+    if unknown_diff:
+        raise ValueError(f"Unknown scope manifest diff keys: {', '.join(unknown_diff)}")
+    if scope == "changed":
+        if diff.get("status") != "available":
+            raise ValueError("Changed scope requires a complete, available Git diff")
+        if diff.get("fileCount") != len(selected):
+            raise ValueError("Changed scope diff fileCount does not match selectedFiles")
+    elif diff.get("status") != "not-applicable":
+        raise ValueError(f"{scope} scope requires diff.status=not-applicable")
     return payload
 
 
@@ -130,16 +269,32 @@ def _line_count(path: Path) -> int | None:
         return None
 
 
-def collect_file_metrics(root: Path) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def collect_file_metrics(
+    root: Path, included_paths: set[str] | None = None
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     files: list[dict[str, Any]] = []
     totals = {"files": 0, "bytes": 0, "textFiles": 0, "binaryFiles": 0, "lines": 0}
-    for path in iter_project_files(root):
+    if included_paths is None:
+        candidates = iter_project_files(root)
+    else:
+        # A governed changed-scope projection contains only committed material.
+        # Measure every selected file even when its directory is commonly used
+        # for generated output (for example build/ or dist/).
+        candidates = (
+            root / relative
+            for relative in sorted(included_paths)
+            if (root / relative).is_file() and not (root / relative).is_symlink()
+        )
+    for path in candidates:
+        relative = relative_path(path, root)
+        if included_paths is not None and relative not in included_paths:
+            continue
         try:
             size = path.stat().st_size
         except OSError:
             continue
         lines = _line_count(path)
-        files.append({"path": relative_path(path, root), "sizeBytes": size, "lines": lines, "binary": lines is None})
+        files.append({"path": relative, "sizeBytes": size, "lines": lines, "binary": lines is None})
         totals["files"] += 1
         totals["bytes"] += size
         if lines is None:
@@ -176,7 +331,12 @@ def analyze_quality_budgets(
     disabled: bool = False,
 ) -> tuple[dict[str, Any], list[Finding]]:
     budgets = resolve_budgets(profile, policy, overrides, disabled=disabled)
-    files, totals = collect_file_metrics(root)
+    scope_kind = str(scope.get("scope") or "full")
+    selected = scope.get("selectedFiles")
+    included_paths: set[str] | None = None
+    if scope_kind in {"changed", "paths"} and isinstance(selected, list):
+        included_paths = {str(item).replace("\\", "/") for item in selected}
+    files, totals = collect_file_metrics(root, included_paths)
     findings: list[Finding] = []
     for item in files:
         size, lines, file_path = int(item["sizeBytes"]), item["lines"], str(item["path"])
@@ -189,7 +349,6 @@ def analyze_quality_budgets(
     if _exceeds(totals["lines"], budgets["maxScopeLines"]):
         findings.append(_finding("budget.scope-lines", totals["lines"], budgets["maxScopeLines"], f"Scoped content length {totals['lines']} lines exceeds budget {budgets['maxScopeLines']}."))
 
-    scope_kind = str(scope.get("scope") or "full")
     diff = scope.get("diff") if isinstance(scope.get("diff"), dict) else {}
     change = {
         "status": diff.get("status", "unavailable"),
@@ -239,6 +398,7 @@ def analyze_quality_budgets(
         "budgets": budgets,
         "scope": scope_kind,
         "totals": totals,
+        "supportFilesExcluded": len(scope.get("supportFiles") or []) if isinstance(scope.get("supportFiles"), list) else 0,
         "change": change,
         "hotspots": {"count": hotspot_count, "historyStatus": history.get("status", "unavailable")},
         "largestFiles": sorted(files, key=lambda item: int(item["sizeBytes"]), reverse=True)[:20],

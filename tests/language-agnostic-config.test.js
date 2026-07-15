@@ -23,7 +23,13 @@ test("unified CLI parses language-agnostic evidence flags", () => {
     "--dependency-graph", "deps.json",
     "--evidence-report", "quality.json",
     "--test-report", "junit.xml",
-    "--allow-dependency-cycles"
+    "--allow-dependency-cycles",
+    "--locale", "pt-BR",
+    "--require-policy",
+    "--policy-sha256", "a".repeat(64),
+    "--require-evidence-provenance",
+    "--expected-source-commit", "deadbeef",
+    "--max-evidence-age-seconds", "3600"
   ]);
 
   assert.equal(parsed.options.maxFileLines, 900);
@@ -32,6 +38,12 @@ test("unified CLI parses language-agnostic evidence flags", () => {
   assert.deepEqual(parsed.options.evidenceReports, ["quality.json"]);
   assert.deepEqual(parsed.options.testReports, ["junit.xml"]);
   assert.equal(parsed.options.allowDependencyCycles, true);
+  assert.equal(parsed.options.locale, "pt-BR");
+  assert.equal(parsed.options.requirePolicy, true);
+  assert.equal(parsed.options.policySha256, "a".repeat(64));
+  assert.equal(parsed.options.requireEvidenceProvenance, true);
+  assert.equal(parsed.options.expectedSourceCommit, "deadbeef");
+  assert.equal(parsed.options.maxEvidenceAgeSeconds, 3600);
 });
 
 test("quality config is rendered into the reproducible command", () => {
@@ -42,7 +54,13 @@ test("quality config is rendered into the reproducible command", () => {
       quality: {
         enabled: true,
         profile: "strict",
+        locale: "pt-BR",
         policyFile: ".quality-gate-policy.json",
+        requirePolicy: true,
+        policySha256: "a".repeat(64),
+        requireEvidenceProvenance: true,
+        expectedSourceCommit: "deadbeef",
+        maxEvidenceAgeSeconds: 3600,
         budgets: { maxFileLines: 1200, maxChangedFiles: 40 },
         dependencyGraph: { reports: ["deps.json"], maxFanOut: 15 },
         evidenceReports: ["quality-evidence.json"],
@@ -55,6 +73,12 @@ test("quality config is rendered into the reproducible command", () => {
     const command = buildEquivalentCommand("quality", options);
 
     assert.match(command, /--policy-file \.quality-gate-policy\.json/);
+    assert.match(command, /--locale pt-BR/);
+    assert.match(command, /--require-policy/);
+    assert.match(command, new RegExp(`--policy-sha256 ${"a".repeat(64)}`));
+    assert.match(command, /--require-evidence-provenance/);
+    assert.match(command, /--expected-source-commit deadbeef/);
+    assert.match(command, /--max-evidence-age-seconds 3600/);
     assert.match(command, /--max-file-lines 1200/);
     assert.match(command, /--max-changed-files 40/);
     assert.match(command, /--max-dependency-fan-out 15/);
@@ -113,6 +137,7 @@ test("GitLab merge request range preserves diff budgets and report artifacts", (
     fs.writeFileSync(path.join(root, "app.txt"), "one\n", "utf8");
     git("add", ".");
     git("commit", "-m", "base");
+    const base = git("rev-parse", "HEAD");
     git("update-ref", "refs/remotes/origin/main", "HEAD");
     fs.writeFileSync(path.join(root, "app.txt"), "one\ntwo\nthree\n", "utf8");
     git("add", ".");
@@ -136,6 +161,7 @@ test("GitLab merge request range preserves diff budgets and report artifacts", (
         ...process.env,
         CI: "true",
         GITLAB_CI: "true",
+        CI_MERGE_REQUEST_DIFF_BASE_SHA: base,
         CI_MERGE_REQUEST_TARGET_BRANCH_NAME: "main",
         CI_COMMIT_SHA: head
       }
@@ -144,9 +170,9 @@ test("GitLab merge request range preserves diff budgets and report artifacts", (
     assert.equal(result.status, 1, result.stderr);
     const summary = JSON.parse(result.stdout);
     assert.equal(summary.status, "NEEDS_CHANGES");
-    assert.equal(summary.scopeResolution.base, "origin/main");
+    assert.equal(summary.scopeResolution.base, base);
     const scope = JSON.parse(fs.readFileSync(path.join(root, "code-approval-report", "quality-scope.json"), "utf8"));
-    assert.equal(scope.diff.base, "origin/main");
+    assert.equal(scope.diff.base, base);
     assert.equal(scope.diff.head, head);
     assert.equal(scope.diff.fileCount, 1);
     assert.ok(scope.diff.changedLines > 1);

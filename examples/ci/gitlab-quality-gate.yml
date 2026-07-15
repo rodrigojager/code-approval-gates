@@ -1,56 +1,57 @@
 ---
+# Pilot template. Blocking enforcement requires a centrally mandatory Pipeline
+# Execution Policy/compliance include; a Merge Request can edit ordinary YAML.
+# Governed values must be group/project/policy variables, not defaults in MR YAML:
+#   CODE_APPROVAL_QUALITY_IMAGE=<ghcr image>@sha256:<published digest>
+#   CODE_APPROVAL_QUALITY_POLICY_FILE=<GitLab File variable or runner-mounted file>
+#   CODE_APPROVAL_QUALITY_POLICY_SHA256=<lowercase SHA-256 of that policy>
+#   CODE_APPROVAL_QUALITY_RUNNER_TAG=<dedicated runner tag>
+#   CODE_APPROVAL_QUALITY_TARGET_BRANCH=<for example: develop>
 variables:
+  GIT_DEPTH: "0"
   CODE_APPROVAL_QUALITY_ENABLED: "true"
   CODE_APPROVAL_QUALITY_BLOCKING: "false"
-  CODE_APPROVAL_QUALITY_IMAGE: "ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0"
-  CODE_APPROVAL_QUALITY_THRESHOLD: "90"
-  CODE_APPROVAL_QUALITY_ENABLE_PII: "false"
-  CODE_APPROVAL_QUALITY_ENABLE_SECRETS: "true"
-  CODE_APPROVAL_QUALITY_ENABLE_COVERAGE: "false"
-  CODE_APPROVAL_QUALITY_COVERAGE_REPORT: "TestResults/**/coverage.cobertura.xml"
-  CODE_APPROVAL_QUALITY_MIN_LINE_COVERAGE: "80"
+  CODE_APPROVAL_QUALITY_LOCALE: "pt-BR"
 
 code_approval_quality:
   stage: quality
+  # Keep this timeout in centrally governed CI, then tune it from pilot data.
+  timeout: 2h
+  before_script: []
   image:
     name: "$CODE_APPROVAL_QUALITY_IMAGE"
     entrypoint: [""]
-    docker:
-      user: "0"
+  tags:
+    - "$CODE_APPROVAL_QUALITY_RUNNER_TAG"
   script:
     - |
-      set -- check "$CI_PROJECT_DIR" \
-        --mode full \
-        --threshold "$CODE_APPROVAL_QUALITY_THRESHOLD" \
-        --fail-on-tool-error \
-        --format json,md \
-        --output .quality/reports
-
-      if [ "$CODE_APPROVAL_QUALITY_ENABLE_SECRETS" = "true" ]; then
-        set -- "$@" --enable-secrets
-      fi
-
-      if [ "$CODE_APPROVAL_QUALITY_ENABLE_PII" = "true" ]; then
-        set -- "$@" --enable-pii
-      fi
-
-      if [ "$CODE_APPROVAL_QUALITY_ENABLE_COVERAGE" = "true" ]; then
-        set -- "$@" \
-          --enable-coverage \
-          --coverage-report "$CODE_APPROVAL_QUALITY_COVERAGE_REPORT" \
-          --min-line-coverage "$CODE_APPROVAL_QUALITY_MIN_LINE_COVERAGE"
-      fi
-
-      quality-sidecar "$@"
+      case "${CODE_APPROVAL_QUALITY_IMAGE:-}" in
+        *@sha256:*) ;;
+        *) echo "CODE_APPROVAL_QUALITY_IMAGE must be pinned by digest" >&2; exit 3 ;;
+      esac
+      test -n "${CODE_APPROVAL_QUALITY_TARGET_BRANCH:-}" || { echo "Governed target branch is required" >&2; exit 3; }
+      test -n "${CODE_APPROVAL_QUALITY_POLICY_FILE:-}" || { echo "Externally governed policy File variable is required" >&2; exit 3; }
+      test -n "${CODE_APPROVAL_QUALITY_POLICY_SHA256:-}" || { echo "Governed policy SHA-256 is required" >&2; exit 3; }
+      # Registry authentication has already been consumed by the Runner. The
+      # scanner must not receive repository, registry, Sonar, or job tokens.
+      unset CI_JOB_TOKEN CI_REGISTRY_PASSWORD CI_REPOSITORY_URL
+      unset CI_JOB_JWT CI_JOB_JWT_V2 CI_DEPLOY_PASSWORD SONAR_TOKEN
+      unset GHCR_READ_TOKEN DOCKER_AUTH_CONFIG
+      unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+      unset GOOGLE_APPLICATION_CREDENTIALS NPM_CONFIG_USERCONFIG GIT_ASKPASS SSH_ASKPASS
+      # Use the immutable image-installed path. A Merge Request must not be able
+      # to replace the CI launcher through a checkout-controlled PATH entry.
+      /usr/local/bin/quality-ci check
   artifacts:
     when: always
     paths:
       - .quality/reports/quality-report.json
       - .quality/reports/quality-report.md
+      - .quality/reports/quality-scope.json
     expire_in: 14 days
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" && $CODE_APPROVAL_QUALITY_ENABLED == "true" && $CODE_APPROVAL_QUALITY_BLOCKING == "true"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CODE_APPROVAL_QUALITY_TARGET_BRANCH && $CODE_APPROVAL_QUALITY_ENABLED == "true" && $CODE_APPROVAL_QUALITY_BLOCKING == "true"'
       allow_failure: false
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop" && $CODE_APPROVAL_QUALITY_ENABLED == "true"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CODE_APPROVAL_QUALITY_TARGET_BRANCH && $CODE_APPROVAL_QUALITY_ENABLED == "true"'
       allow_failure: true
     - when: never

@@ -1,0 +1,49 @@
+---
+# Example consumer pipeline: tests produce JUnit/coverage artifacts first;
+# Quality Gate and the company's existing SonarQube job then run independently
+# in parallel.
+# Include/copy examples/ci/gitlab-quality-gate.yml before applying this overlay.
+stages:
+  - test
+  - quality
+
+dotnet_test_evidence:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:8.0
+  tags:
+    - "$DOTNET_RUNNER_TAG"
+  script:
+    # Requires JunitXml.TestLogger and coverlet.collector in the test projects.
+    - dotnet restore
+    - dotnet test --no-restore --logger:"junit;LogFilePath=TestResults/{assembly}-junit.xml" --collect:"XPlat Code Coverage" --results-directory TestResults
+  artifacts:
+    when: always
+    paths:
+      - TestResults/
+    reports:
+      junit:
+        - TestResults/**/*-junit.xml
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CODE_APPROVAL_QUALITY_TARGET_BRANCH'
+
+# The base job comes from gitlab-quality-gate.yml. The initial corporate
+# quality-ci boundary does not accept report paths from job/MR variables and
+# never runs dotnet/npm/python tests itself. Report/evidence ingestion remains
+# pending until its paths and enablement come from root-owned config or policy.
+code_approval_quality:
+  needs:
+    - job: dotnet_test_evidence
+      artifacts: false
+
+# Required integration point: replace `.company_sonarqube_dotnet` with the
+# company's already hardened, centrally maintained SonarQube job. That job owns
+# scanner installation, token handling, coverage paths, and protected-branch/MR
+# rules. Do not copy a SONAR_TOKEN into a generic build job that executes MR code.
+sonarqube_quality:
+  extends: .company_sonarqube_dotnet
+  needs:
+    - job: dotnet_test_evidence
+      artifacts: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $CODE_APPROVAL_QUALITY_TARGET_BRANCH'

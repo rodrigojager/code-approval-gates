@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -64,6 +65,7 @@ def run_command(
     timeout_seconds: int = 1800,
     acceptable_exit_codes: set[int] | None = None,
     output_path: Path | None = None,
+    inherit_environment: bool = False,
 ) -> ToolResult:
     acceptable = acceptable_exit_codes if acceptable_exit_codes is not None else {0}
     executable = command[0]
@@ -79,7 +81,7 @@ def run_command(
         result = subprocess.run(
             resolved_command,
             cwd=str(cwd),
-            env={**os.environ, **(env or {})},
+            env=_subprocess_environment(env, inherit=inherit_environment),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -126,6 +128,63 @@ def run_command(
     )
 
 
+SAFE_SUBPROCESS_ENV_NAMES = {
+    "ALL_PROXY",
+    "COMSPEC",
+    "CURL_CA_BUNDLE",
+    "DOTNET_ROOT",
+    "GIT_SSL_CAINFO",
+    "HOME",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "JAVA_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_COLOR",
+    "NO_PROXY",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PYTHONIOENCODING",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_CACHE_HOME",
+}
+
+
+def _subprocess_environment(overrides: dict[str, str] | None, *, inherit: bool) -> dict[str, str]:
+    """Build a least-privilege environment for analyzers.
+
+    Project-owned test commands are the sole opt-in caller that inherits the
+    complete environment. Security analyzers receive only runtime, locale,
+    proxy, and CA settings plus values supplied by this package itself.
+    """
+    if inherit:
+        environment = dict(os.environ)
+    else:
+        allowed = {name.upper() for name in SAFE_SUBPROCESS_ENV_NAMES}
+        environment = {name: value for name, value in os.environ.items() if name.upper() in allowed}
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+    environment.setdefault("NO_COLOR", "1")
+    environment.update(overrides or {})
+    return environment
+
+
 def run_external_tools(
     root: Path,
     reports_dir: Path,
@@ -133,6 +192,7 @@ def run_external_tools(
     *,
     enable_secrets: bool = False,
     enable_iac: bool = True,
+    run_project_tests: bool = False,
 ) -> tuple[list[ToolResult], list[Finding]]:
     if mode in {"quick", "offline"}:
         return [], []
@@ -185,10 +245,11 @@ def run_external_tools(
         results.append(result)
         findings.extend(parsed_findings)
 
-    test_result, test_findings = run_project_tests(root, raw_dir)
-    if test_result:
-        results.append(test_result)
-        findings.extend(test_findings)
+    if run_project_tests:
+        test_result, test_findings = _run_project_tests(root, raw_dir)
+        if test_result:
+            results.append(test_result)
+            findings.extend(test_findings)
 
     return results, findings
 
@@ -264,6 +325,50 @@ MEGALINTER_ENABLED_LINTERS = ",".join(
     ]
 )
 
+MEGALINTER_GENERIC_DUPLICATE_LINTERS = ",".join(
+    [
+        "COPYPASTE_JSCPD",
+        "REPOSITORY_CHECKOV",
+        "REPOSITORY_GIT_DIFF",
+        "REPOSITORY_GITLEAKS",
+        "REPOSITORY_OSV_SCANNER",
+        "REPOSITORY_SEMGREP",
+        "REPOSITORY_TRIVY",
+    ]
+)
+
+INSTALLED_CONFIG_DIR = Path("/opt/quality-sidecar/sidecar/config")
+SOURCE_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+MEGALINTER_CONFIG_DIR = (INSTALLED_CONFIG_DIR if INSTALLED_CONFIG_DIR.is_dir() else SOURCE_CONFIG_DIR).resolve()
+MEGALINTER_ESLINT_CONFIG_DIR = str(MEGALINTER_CONFIG_DIR)
+ESLINT_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "eslint.config.mjs")
+MEGALINTER_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "megalinter-ci.yml")
+CHECKOV_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "checkov-ci.yml")
+GITLEAKS_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "gitleaks-ci.toml")
+GITLEAKS_TRUSTED_IGNORE = str(MEGALINTER_CONFIG_DIR / "gitleaksignore-ci")
+JSCPD_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "jscpd-ci.json")
+OSV_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "osv-scanner-ci.toml")
+TRIVY_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "trivy-ci.yaml")
+TRIVY_TRUSTED_IGNORE = str(MEGALINTER_CONFIG_DIR / "trivyignore-ci")
+TFLINT_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "tflint-ci.hcl")
+QUALITY_GATE_FLAVOR_FILE = Path("/etc/code-approval/quality-gate-flavor")
+
+
+def _quality_gate_flavor() -> str:
+    if QUALITY_GATE_FLAVOR_FILE.is_file():
+        try:
+            flavor = QUALITY_GATE_FLAVOR_FILE.read_text(encoding="utf-8").strip().lower()
+        except OSError as error:
+            raise RuntimeError(f"Unable to read baked quality-gate flavor: {error}") from error
+    else:
+        # Source-checkout fallback for local development and unit tests. The
+        # production image always contains the root-owned file above.
+        flavor = os.environ.get("QUALITY_GATE_FLAVOR", "generic").strip().lower()
+
+    if flavor not in {"generic", "dotnetweb"}:
+        raise RuntimeError(f"Unsupported quality-gate flavor: {flavor or '<empty>'}")
+    return flavor
+
 
 def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
     configured = os.environ.get("MEGALINTER_COMMAND")
@@ -276,11 +381,31 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         "APPLY_FIXES": "none",
         "PRINT_ALL_FILES": "false",
         "SHOW_ELAPSED_TIME": "true",
-        "FILTER_REGEX_EXCLUDE": r"(\.quality/|node_modules/|coverage/|dist/|tmp/)",
-        "ENABLE_LINTERS": MEGALINTER_ENABLED_LINTERS,
-        "JAVASCRIPT_ES_RULES_PATH": "../../opt/quality-sidecar/sidecar/config",
+        "FILTER_REGEX_EXCLUDE": _megalinter_exclude_regex(root),
+        "MEGALINTER_CONFIG": MEGALINTER_TRUSTED_CONFIG,
+        # MegaLinter's activation probe prepends the workspace even when a
+        # rules path is absolute. A generated relative path reaches the same
+        # root-owned config from arbitrary GitLab checkout locations.
+        "JAVASCRIPT_ES_RULES_PATH": _megalinter_rules_path(root),
         "JAVASCRIPT_ES_CONFIG_FILE": "eslint.config.mjs",
+        # An explicit absolute --config prevents a project file with the same
+        # name from winning MegaLinter's normal workspace-first lookup.
+        "JAVASCRIPT_ES_ARGUMENTS": f"--config {ESLINT_TRUSTED_CONFIG} --no-ignore --no-inline-config",
+        "TERRAFORM_TFLINT_RULES_PATH": str(MEGALINTER_CONFIG_DIR),
+        "TERRAFORM_TFLINT_CONFIG_FILE": Path(TFLINT_TRUSTED_CONFIG).name,
     }
+    # The portable flavor retains MegaLinter's language auto-detection. The
+    # smaller dotnetweb flavor is deliberately constrained to linters shipped
+    # by that base image so a missing analyzer is an operational error rather
+    # than an accidental cross-language promise.
+    if _quality_gate_flavor() == "dotnetweb":
+        env["ENABLE_LINTERS"] = MEGALINTER_ENABLED_LINTERS
+    else:
+        # These analyzers run as first-class sidecar tools with normalized
+        # findings. Git diff is also incompatible with the metadata-free
+        # workspace projection used by the GitLab container contract. Retain
+        # automatic language linter discovery in the portable image.
+        env["DISABLE_LINTERS"] = MEGALINTER_GENERIC_DUPLICATE_LINTERS
     result = run_command(
         "megalinter",
         command,
@@ -290,9 +415,31 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         acceptable_exit_codes={0, 1},
         output_path=raw_dir / "megalinter",
     )
+    output_directory = Path(result.output_path or "")
+    evidence_logs = _megalinter_evidence_logs(output_directory)
+    if result.status not in {"missing", "timeout", "error"} and not evidence_logs:
+        result.status = "error"
+        result.error = "MegaLinter did not produce the required per-analyzer execution logs."
+        result.summary["evidenceValid"] = False
+        return result
+    if evidence_logs:
+        result.summary["evidenceValid"] = True
+        result.summary["executedAnalyzers"] = sorted(
+            {
+                path.stem.removesuffix("-SUCCESS").removesuffix("-ERROR").removesuffix("-suggestions")
+                for path in evidence_logs
+            }
+        )
     if result.exit_code == 1:
-        error_logs = _megalinter_error_logs(Path(result.output_path or ""))
-        fatal_logs = [path for path in error_logs if "Fatal error while calling" in _read_text(path)]
+        error_logs = _megalinter_error_logs(output_directory)
+        fatal_logs = [
+            path
+            for path in error_logs
+            if any(
+                marker in _read_text(path)
+                for marker in ("Fatal error while calling", "Failed to initialize plugins")
+            )
+        ]
         if not error_logs:
             result.status = "error"
             result.error = "MegaLinter failed without producing analyzer logs."
@@ -306,9 +453,41 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
     return result
 
 
+def _megalinter_exclude_regex(root: Path) -> str:
+    root_text = root.resolve().as_posix().rstrip("/") or "/"
+    escaped_root = re.escape(root_text)
+    # Match dependency/output directories only below the analyzed root. A
+    # plain `tmp/` expression also matched the `/tmp/...` smoke/GitLab mount
+    # prefix and silently reduced MegaLinter to a zero-file run.
+    return rf"^{escaped_root}/(?:.*?/)?(?:\.quality|node_modules|coverage|dist|tmp)(?:/|$)"
+
+
+def _megalinter_rules_path(root: Path) -> str:
+    """Return a relative config path when the host filesystem permits it."""
+
+    try:
+        return os.path.relpath(MEGALINTER_CONFIG_DIR, root)
+    except ValueError:
+        # Windows cannot express a relative path across drive letters. This
+        # branch is useful for source-tree tests/local invocation; the Linux
+        # production image always takes the relative-path branch above.
+        return str(MEGALINTER_CONFIG_DIR)
+
+
 def _megalinter_error_logs(output_dir: Path) -> list[Path]:
     logs_dir = output_dir / "linters_logs"
     return sorted(logs_dir.glob("*-ERROR.log")) if logs_dir.is_dir() else []
+
+
+def _megalinter_evidence_logs(output_dir: Path) -> list[Path]:
+    logs_dir = output_dir / "linters_logs"
+    if not logs_dir.is_dir() or logs_dir.is_symlink():
+        return []
+    return sorted(
+        path
+        for path in logs_dir.glob("*.log")
+        if path.is_file() and not path.is_symlink() and path.stat().st_size > 0 and not path.name.endswith("-suggestions.log")
+    )
 
 
 def _read_text(path: Path) -> str:
@@ -320,12 +499,16 @@ def _read_text(path: Path) -> str:
 
 def _run_semgrep(root: Path, raw_dir: Path) -> ToolResult:
     output = raw_dir / "semgrep.json"
-    return run_command(
+    result = run_command(
         "semgrep",
         [
             "semgrep",
             "scan",
-            "--config=auto",
+            "--config=p/default",
+            "--metrics=off",
+            "--no-git-ignore",
+            "--x-ignore-semgrepignore-files",
+            "--disable-nosem",
             "--exclude",
             ".git",
             "--exclude",
@@ -338,10 +521,17 @@ def _run_semgrep(root: Path, raw_dir: Path) -> ToolResult:
             str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
+    result.summary["analysisInput"] = {
+        "kind": "ruleset",
+        "source": "semgrep-registry:p/default",
+        "pinned": False,
+        "networkRequired": True,
+    }
+    return result
 
 
 def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
@@ -351,17 +541,21 @@ def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
         [
             "gitleaks",
             "--redact=100",
-            "detect",
-            "--source",
-            str(root),
+            "--no-banner",
+            "--config",
+            GITLEAKS_TRUSTED_CONFIG,
+            "--gitleaks-ignore-path",
+            GITLEAKS_TRUSTED_IGNORE,
+            "--ignore-gitleaks-allow",
             "--report-format",
             "json",
             "--report-path",
             str(output),
-            "--no-git",
+            "dir",
+            str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
@@ -372,11 +566,16 @@ def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult
     scanners = "vuln,misconfig,secret" if enable_secrets else "vuln,misconfig"
     skipped_directories = [root / name for name in (".git", ".quality", "node_modules", "vendor")]
     skip_args = [argument for directory in skipped_directories for argument in ("--skip-dirs", str(directory))]
-    return run_command(
+    result = run_command(
         "trivy",
         [
             "trivy",
+            "--config",
+            TRIVY_TRUSTED_CONFIG,
             "fs",
+            "--ignorefile",
+            TRIVY_TRUSTED_IGNORE,
+            "--show-suppressed",
             "--scanners",
             scanners,
             "--format",
@@ -389,10 +588,17 @@ def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult
             str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0},
         output_path=output,
     )
+    result.summary["analysisInput"] = {
+        "kind": "vulnerability-database",
+        "source": "ghcr.io/aquasecurity/trivy-db",
+        "pinned": False,
+        "networkRequired": True,
+    }
+    return result
 
 
 def _copy_stdout_to_output(result: ToolResult, output: Path) -> None:
@@ -405,9 +611,18 @@ def _run_checkov(root: Path, raw_dir: Path, iac_files: list[str]) -> ToolResult:
     output = raw_dir / "checkov.json"
     result = run_command(
         "checkov",
-        ["checkov", "-d", str(root), "-o", "json", "--quiet"],
+        [
+            "checkov",
+            "--config-file",
+            CHECKOV_TRUSTED_CONFIG,
+            f"--directory={root}",
+            "--output",
+            "json",
+            "--quiet",
+            "--skip-download",
+        ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
@@ -421,9 +636,21 @@ def _run_osv_scanner(root: Path, raw_dir: Path) -> ToolResult:
     output = raw_dir / "osv-scanner.json"
     result = run_command(
         "osv-scanner",
-        ["osv-scanner", "--recursive", "--format", "json", str(root)],
+        [
+            "osv-scanner",
+            "scan",
+            "source",
+            "--recursive",
+            "--no-ignore",
+            "--allow-no-lockfiles",
+            "--config",
+            OSV_TRUSTED_CONFIG,
+            "--format",
+            "json",
+            str(root),
+        ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
@@ -435,6 +662,12 @@ def _run_osv_scanner(root: Path, raw_dir: Path) -> ToolResult:
         result.status = "ok"
         result.exit_code = 0
         result.error = None
+    result.summary["analysisInput"] = {
+        "kind": "vulnerability-database",
+        "source": "osv.dev",
+        "pinned": False,
+        "networkRequired": True,
+    }
     return result
 
 
@@ -444,25 +677,27 @@ def _run_jscpd(root: Path, raw_dir: Path) -> ToolResult:
         "jscpd",
         [
             "jscpd",
+            "--config",
+            JSCPD_TRUSTED_CONFIG,
+            "--no-gitignore",
             "--silent",
             "--reporters",
             "json",
             "--ignore",
-            "**/*.md,**/.quality/**,**/node_modules/**,.quality/**,node_modules/**",
+            "**/*.md,**/.quality/**,**/node_modules/**,**/obj/**,**/bin/**,.quality/**,node_modules/**,obj/**,bin/**",
             "--output",
             str(output_dir),
-            ".",
+            str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output_dir / "jscpd-report.json",
     )
     report = output_dir / "jscpd-report.json"
-    if not report.exists():
-        matches = list(output_dir.rglob("*.json")) if output_dir.exists() else []
-        if matches:
-            result.output_path = str(matches[0])
+    # The exact reporter contract is deliberate. Picking an arbitrary JSON
+    # file could normalize unrelated or attacker-controlled evidence.
+    result.output_path = str(report)
     return result
 
 
@@ -831,7 +1066,7 @@ def _project_test_outcome(result: ToolResult, *, path: str, message: str) -> tup
     ]
 
 
-def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
+def _run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
     package_json = root / "package.json"
     if package_json.exists() and shutil.which("npm"):
         missing_workspaces = _missing_npm_workspaces(root, package_json)
@@ -858,6 +1093,7 @@ def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, lis
             raw_dir,
             cwd=root,
             acceptable_exit_codes={0, 1},
+            inherit_environment=True,
         )
         return _project_test_outcome(result, path="package.json", message="Project test command failed.")
 
@@ -870,48 +1106,127 @@ def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, lis
             raw_dir,
             cwd=root,
             acceptable_exit_codes={0, 1},
+            inherit_environment=True,
         )
         return _project_test_outcome(result, path="tests", message="Python unittest discovery failed.")
 
     return None, []
 
 
+def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
+    """Run project-owned tests only after an explicit caller opt-in."""
+    return _run_project_tests(root, raw_dir)
+
+
 def parse_json(path: str | None) -> Any | None:
+    """Compatibility helper for callers that do not require evidence proof."""
+    payload, _ = _load_json_evidence(path)
+    return payload
+
+
+def _load_json_evidence(path: str | None) -> tuple[Any | None, str | None]:
     if not path:
-        return None
+        return None, "the analyzer did not declare an output path"
+    file_path = Path(path)
+    if not file_path.is_file() or file_path.is_symlink():
+        return None, "the analyzer did not produce the expected regular JSON report"
     try:
-        file_path = Path(path)
-        if file_path.is_dir():
-            matches = sorted(file_path.rglob("*.json"))
-            file_path = matches[0] if matches else file_path
-        if not file_path.exists() or file_path.is_dir():
-            return None
-        text = file_path.read_text(encoding="utf-8", errors="replace").strip()
-        if not text:
-            return None
-        return json.loads(text)
-    except (OSError, json.JSONDecodeError):
-        return None
+        text = file_path.read_text(encoding="utf-8", errors="strict").strip()
+    except (OSError, UnicodeError):
+        return None, "the analyzer JSON report could not be read as UTF-8"
+    if not text:
+        return None, "the analyzer JSON report is empty"
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        return None, "the analyzer JSON report is malformed"
+
+
+def _validate_tool_payload(name: str, payload: Any) -> None:
+    if name == "semgrep":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("Semgrep report needs a results array")
+    elif name == "gitleaks":
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise ValueError("Gitleaks report needs an array of findings")
+    elif name == "trivy":
+        if not isinstance(payload, dict) or not isinstance(payload.get("Results"), list):
+            raise ValueError("Trivy report needs a Results array")
+    elif name == "checkov":
+        documents = payload if isinstance(payload, list) else [payload]
+        if not documents or not all(
+            isinstance(item, dict)
+            and (
+                isinstance(item.get("results"), (dict, list))
+                or _is_official_empty_checkov_summary(item)
+            )
+            for item in documents
+        ):
+            raise ValueError("Checkov report needs results objects or an official empty summary")
+    elif name == "osv-scanner":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("OSV-Scanner report needs a results array")
+    elif name == "jscpd":
+        if not isinstance(payload, dict) or not isinstance(payload.get("duplicates"), list):
+            raise ValueError("jscpd report needs a duplicates array")
+
+
+def _is_official_empty_checkov_summary(payload: dict[str, Any]) -> bool:
+    """Recognize Checkov 3.x's real zero-resource JSON contract.
+
+    Checkov omits ``results`` when no checks apply and emits only counters plus
+    its version. Accept that exact empty state without treating arbitrary `{}`
+    as successful analyzer evidence.
+    """
+    if "results" in payload:
+        return False
+    counters = ("passed", "failed", "skipped", "parsing_errors", "resource_count")
+    expected_keys = {*counters, "checkov_version"}
+    return (
+        set(payload) == expected_keys
+        and all(isinstance(payload.get(name), int) and not isinstance(payload.get(name), bool) for name in counters)
+        and all(payload[name] == 0 for name in counters)
+        and isinstance(payload.get("checkov_version"), str)
+        and bool(payload["checkov_version"].strip())
+    )
 
 
 def parse_tool_findings(name: str, result: ToolResult, root: Path) -> list[Finding]:
-    if result.status in {"missing", "timeout", "error"}:
+    if result.status in {"missing", "timeout", "error", "skipped"}:
         return []
     if name == "megalinter":
         return _parse_megalinter(result)
-    if name == "semgrep":
-        return _parse_semgrep(parse_json(result.output_path), root)
-    if name == "gitleaks":
-        return _parse_gitleaks(parse_json(result.output_path), root)
-    if name == "trivy":
-        return _parse_trivy(parse_json(result.output_path), root)
-    if name == "checkov":
-        return _parse_checkov(parse_json(result.output_path), root)
-    if name == "osv-scanner":
-        return _parse_osv(parse_json(result.output_path), root)
-    if name == "jscpd":
-        return _parse_jscpd(parse_json(result.output_path), root)
-    return []
+    parsers = {
+        "semgrep": _parse_semgrep,
+        "gitleaks": _parse_gitleaks,
+        "trivy": _parse_trivy,
+        "checkov": _parse_checkov,
+        "osv-scanner": _parse_osv,
+        "jscpd": _parse_jscpd,
+    }
+    parser = parsers.get(name)
+    if parser is None:
+        return []
+    payload, error = _load_json_evidence(result.output_path)
+    if error is None:
+        try:
+            _validate_tool_payload(name, payload)
+        except (TypeError, ValueError) as validation_error:
+            error = str(validation_error)
+    if error is not None:
+        result.status = "error"
+        result.error = f"Invalid analyzer evidence: {error}."
+        result.summary["evidenceValid"] = False
+        return []
+    try:
+        findings = parser(payload, root)
+    except (AttributeError, TypeError, ValueError):
+        result.status = "error"
+        result.error = "Invalid analyzer evidence: the report shape could not be normalized."
+        result.summary["evidenceValid"] = False
+        return []
+    result.summary["evidenceValid"] = True
+    return findings
 
 
 def _parse_megalinter(result: ToolResult) -> list[Finding]:
@@ -986,45 +1301,69 @@ def _parse_trivy(payload: Any, root: Path) -> list[Finding]:
     for result in (payload or {}).get("Results", []):
         target = _normalize_path(result.get("Target"), root)
         for vuln in result.get("Vulnerabilities", []) or []:
+            suppressed = _trivy_item_suppressed(vuln)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=vuln.get("VulnerabilityID", "trivy.vulnerability"),
-                    severity=normalize_severity(vuln.get("Severity")),
-                    category="vulnerability",
+                    severity="high" if suppressed else normalize_severity(vuln.get("Severity")),
+                    category="policy-suppression" if suppressed else "vulnerability",
                     path=target,
-                    message=vuln.get("Title") or vuln.get("Description") or "Vulnerability detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else vuln.get("Title") or vuln.get("Description") or "Vulnerability detected by Trivy."
+                    ),
                     metadata={
                         "package": vuln.get("PkgName"),
                         "installedVersion": vuln.get("InstalledVersion"),
                         "fixedVersion": vuln.get("FixedVersion"),
+                        "status": vuln.get("Status"),
+                        "suppressedByProject": suppressed,
                     },
                 )
             )
         for secret in result.get("Secrets", []) or []:
+            suppressed = _trivy_item_suppressed(secret)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=secret.get("RuleID", "trivy.secret"),
-                    severity=normalize_severity(secret.get("Severity") or "critical"),
-                    category="secrets",
+                    severity="high" if suppressed else normalize_severity(secret.get("Severity") or "critical"),
+                    category="policy-suppression" if suppressed else "secrets",
                     path=target,
                     line=secret.get("StartLine"),
-                    message=secret.get("Title") or "Secret detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else secret.get("Title") or "Secret detected by Trivy."
+                    ),
+                    metadata={"status": secret.get("Status"), "suppressedByProject": suppressed},
                 )
             )
         for misconfig in result.get("Misconfigurations", []) or []:
+            suppressed = _trivy_item_suppressed(misconfig)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=misconfig.get("ID", "trivy.misconfiguration"),
-                    severity=normalize_severity(misconfig.get("Severity")),
-                    category="misconfiguration",
+                    severity="high" if suppressed else normalize_severity(misconfig.get("Severity")),
+                    category="policy-suppression" if suppressed else "misconfiguration",
                     path=target,
-                    message=misconfig.get("Title") or "Misconfiguration detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else misconfig.get("Title") or "Misconfiguration detected by Trivy."
+                    ),
+                    metadata={"status": misconfig.get("Status"), "suppressedByProject": suppressed},
                 )
             )
     return findings
+
+
+def _trivy_item_suppressed(item: dict[str, Any]) -> bool:
+    status = str(item.get("Status", "")).upper()
+    return status in {"EXCEPTION", "SUPPRESSED"} or item.get("IsSuppressed") is True
 
 
 def _parse_checkov(payload: Any, root: Path) -> list[Finding]:
@@ -1045,6 +1384,25 @@ def _parse_checkov(payload: Any, root: Path) -> list[Finding]:
                     "resource": item.get("resource"),
                     "guideline": item.get("guideline"),
                     "checkClass": item.get("check_class"),
+                },
+            )
+        )
+    for item in _iter_checkov_skipped_checks(payload):
+        line_range = item.get("file_line_range") or []
+        line = line_range[0] if isinstance(line_range, list) and line_range else None
+        findings.append(
+            Finding(
+                tool="checkov",
+                rule=item.get("check_id", "checkov.suppression"),
+                severity="high",
+                category="policy-suppression",
+                path=_normalize_checkov_path(item, root),
+                line=line if isinstance(line, int) else None,
+                message="Project-controlled Checkov suppression is not trusted.",
+                metadata={
+                    "resource": item.get("resource"),
+                    "suppressedByProject": True,
+                    "suppressComment": item.get("suppress_comment"),
                 },
             )
         )
@@ -1069,6 +1427,28 @@ def _iter_checkov_failed_checks(payload: Any) -> Iterable[dict[str, Any]]:
             yield from _iter_checkov_failed_checks(item)
     failed = payload.get("failed_checks") or []
     for item in failed:
+        if isinstance(item, dict):
+            yield item
+
+
+def _iter_checkov_skipped_checks(payload: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_checkov_skipped_checks(item)
+        return
+    if not isinstance(payload, dict):
+        return
+    results = payload.get("results")
+    if isinstance(results, dict):
+        skipped = results.get("skipped_checks") or []
+        for item in skipped:
+            if isinstance(item, dict):
+                yield item
+    elif isinstance(results, list):
+        for item in results:
+            yield from _iter_checkov_skipped_checks(item)
+    skipped = payload.get("skipped_checks") or []
+    for item in skipped:
         if isinstance(item, dict):
             yield item
 

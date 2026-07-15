@@ -1,150 +1,220 @@
-# Plano revisado: Quality Gate no GitLab com imagem no GHCR
+# Tutorial: piloto do Quality Gate no GitLab com SonarQube
 
-## Decisão arquitetural
+Este é o guia canônico em português para o primeiro piloto corporativo. O cenário de referência é uma aplicação web .NET, Merge Requests para `develop`, GitLab Docker executor e um job SonarQube corporativo que já existe.
 
-Para a necessidade atual, será mantida uma única imagem do Quality Gate. Ela será construída pelo GitHub Actions, publicada no GitHub Container Registry (GHCR) e executada diretamente pelo Docker executor do GitLab Runner.
+> Estado atual: a implementação está na branch `final`, mas a imagem ainda precisa ser publicada e não existe digest de produção. O piloto deve permanecer **advisory/não bloqueante** até concluir as validações de imagem, scanners, GitLab e governança descritas aqui.
 
-```text
-GitHub (código e release) -> GHCR (imagem versionada) -> GitLab Runner (job do MR)
-                                                        |-> SonarQube
-                                                        |-> Quality Gate
-```
-
-O job do Merge Request não executa Docker dentro de Docker, não recebe `/var/run/docker.sock`, não instala npm e não contém o Semantic Gate. O Docker é usado apenas pelo GitLab Runner para iniciar a imagem do job.
-
-Compose não é necessário nesse fluxo. Ele seria útil para subir serviços que precisassem conversar entre si; o Quality Gate é um processo de análise que termina e devolve um código de saída. SonarQube continua sendo um serviço externo já administrado separadamente.
-
-## O que mudou em relação ao plano original
-
-O plano original continua útil como visão de longo prazo, mas tenta resolver muitas questões antes de colocar o primeiro gate em operação. Para o piloto, ficam removidos do caminho crítico:
-
-- criação de uma segunda imagem ou de um target `gitlab`;
-- implementação de `--engine=local` no wrapper Node;
-- publicação npm do wrapper;
-- Container Registry no GitLab;
-- runner privilegiado para construir imagens;
-- Docker-in-Docker em pipelines de Merge Request;
-- integração de cobertura antes de confirmar o artifact produzido pelo projeto consumidor;
-- relatório CodeClimate e comentários automáticos no Merge Request;
-- escopo baseado em diff antes de existir uma implementação testada.
-
-A imagem atual já instala o comando `quality-sidecar`. No GitLab, o template sobrescreve o entrypoint da imagem e chama esse comando diretamente. O wrapper `quality-check` continua container-first para uso em desktops.
-
-Como o primeiro consumidor é uma aplicação .NET web, a imagem usa a flavor oficial `dotnetweb` do MegaLinter. Ela inclui linters de C#, arquivos web e formatos de infraestrutura relevantes, e reduz aproximadamente pela metade o tamanho compactado da base completa. Antes do rollout para stacks diferentes, valide outra flavor ou uma variante da imagem; não presuma que uma imagem otimizada para .NET cobre todas as linguagens.
-
-## Limitação conhecida do primeiro piloto
-
-O Quality Gate atual analisa todo o checkout. Ele ainda não separa arquivos alterados de arquivos usados apenas como contexto. Portanto, a promessa do plano original de que dívida legada não alterada nunca bloqueará o MR ainda não está implementada.
-
-Por esse motivo, o template começa com:
-
-```yaml
-CODE_APPROVAL_QUALITY_BLOCKING: "false"
-```
-
-Nesse modo, o job executa, gera relatórios e pode falhar sem bloquear o merge. Depois de levantar o baseline e corrigir ou tratar falsos positivos de forma explícita, altere a variável para `"true"`. A implementação de escopo por diff deve ser uma fase posterior, com testes próprios para ranges de Merge Request do GitLab.
-
-## Publicação no GHCR
-
-O workflow `.github/workflows/quality-gate-image.yml`:
-
-- constrói a imagem em Pull Requests que alterem o Quality Gate;
-- publica apenas quando uma tag `quality-v*` é enviada;
-- usa o `GITHUB_TOKEN`, sem PAT adicional para publicação;
-- publica tags versionadas e uma tag baseada no SHA;
-- não publica `latest`;
-- gera SBOM e proveniência pelo BuildKit;
-- fixa as GitHub Actions por commit SHA.
-
-Primeira publicação sugerida, depois que as mudanças estiverem revisadas e commitadas:
-
-```powershell
-git tag -s quality-v0.2.0 -m "Quality Gate 0.2.0"
-git push origin quality-v0.2.0
-```
-
-Se a assinatura de tags ainda não estiver configurada, use uma tag anotada com `git tag -a` e registre a configuração de assinatura como melhoria posterior.
-
-Isso publicará:
+## O desenho do piloto
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0
+GitHub Actions -> GHCR (imagem por digest) -> GitLab Runner dedicado
+                                                |
+job .NET de testes -----------------------------+-> job Sonar corporativo
+                                                |
+checkout Git imutável --------------------------+-> Quality Gate advisory
 ```
 
-O GHCR cria o primeiro pacote como privado. Mantenha essa visibilidade durante a primeira publicação e verifique o conteúdo e os metadados da imagem antes de tomar outra decisão.
+- O Runner usa Docker apenas para iniciar o container do job.
+- Não há Docker-in-Docker, `privileged`, socket Docker ou Compose.
+- O container executa como UID/GID `10001`, não como root.
+- O Semantic Gate fica fora dessa imagem e desse piloto.
+- O `quality-ci` não chama deliberadamente testes/build/scripts do projeto. Porém analisadores podem invocar toolchains e avaliar configs/MSBuild controlados pelo MR; por isso o piloto continua non-root e advisory.
+- No contrato inicial ele também não consome JUnit, cobertura ou evidence por paths fornecidos pelo job. Esses sinais continuam no GitLab/Sonar até existir uma fonte root-owned ou policy-governed para os mappings.
+- O comando normativo é somente `/usr/local/bin/quality-ci check`; flags adicionais são rejeitadas.
 
-Se a imagem continuar privada, use uma conta técnica separada, com acesso `Read` somente ao package e PAT classic limitado a `read:packages`. Armazene essa credencial no host de um runner dedicado, não no repositório nem no script do job de Merge Request. Se a imagem contiver apenas conteúdo que já é público neste repositório, torná-la pública posteriormente elimina a necessidade de uma credencial GitHub no GitLab, mas essa mudança de visibilidade é irreversível.
+## 1. Limite de segurança real
 
-O procedimento completo de revisão, credenciais, push, publicação e configuração segura do runner está em `docs/proximos-passos-publicacao-segura.md`.
+O template comum dentro do próprio repositório pode ser alterado por um Merge Request. Variáveis de job também podem sobrescrever variáveis predefinidas do GitLab. Portanto:
 
-## Preparação do GitLab Runner
+- modo bloqueante exige uma **Pipeline Execution Policy**, compliance pipeline ou outro include obrigatório que o autor do MR não consiga remover;
+- imagem, policy, digest, runner tag, target branch, timeout e modo bloqueante precisam ser administrados no grupo/projeto/policy central;
+- variáveis `Protected` normalmente não chegam a pipelines de MR de branches não protegidas; teste o comportamento real da empresa em vez de copiar valores para o YAML;
+- template protegido e variáveis de grupo/projeto ajudam no piloto, mas sozinhos não tornam um job comum obrigatório.
 
-O runner consumidor deve continuar com:
+O runtime adiciona defesa em profundidade, mas não substitui enforcement central. O MegaLinter também exige cautela: `MEGALINTER_CONFIG` não neutraliza automaticamente configs, suppressions inline e mecanismos de ignore de cada analisador. Analisadores C# podem avaliar MSBuild do MR. Antes de bloquear merges, inventarie cada linter ativo, fixe sua configuração e detecte suppressions perigosas.
+
+## 2. Runner
+
+Confirme no ambiente real:
+
+- runner `linux/amd64` dedicado e restrito ao projeto/grupo autorizado;
+- `privileged = false`;
+- nenhum `/var/run/docker.sock` montado;
+- escrita do UID `10001` no checkout e em `.quality/reports`;
+- egress controlado para GHCR e para os bancos/regras usados pelos scanners;
+- memória e CPU suficientes;
+- timeout central do job (o exemplo usa `2h`, a ser calibrado no piloto).
+
+Exemplo de fronteira do executor:
 
 ```toml
 [runners.docker]
   privileged = false
   pull_policy = "always"
   allowed_images = [
-    "ghcr.io/rodrigojager/code-approval-quality-gate:*",
+    "ghcr.io/rodrigojager/code-approval-quality-gate@sha256:*",
     "mcr.microsoft.com/dotnet/sdk:*"
   ]
+  volumes = ["/cache"]
 ```
 
-Não monte o socket Docker no runner. Se `allowed_images` já existe, acrescente a imagem do Quality Gate sem remover as imagens necessárias aos outros jobs.
+Não use `image:docker:user: 0`, DinD ou socket Docker para corrigir ownership. Ajuste permissões do checkout/cache para o UID `10001`.
 
-A imagem usa o usuário não privilegiado `quality` por padrão. O template seleciona UID 0 explicitamente apenas dentro do container isolado do job para gravar relatórios em checkouts do GitLab com diferentes modelos de ownership. Isso exige uma versão do GitLab e do Runner compatível com `image:docker:user`. O usuário do container não recebe privilégio no host: `privileged` permanece `false`, o socket Docker não é montado e `allowed_images` restringe a imagem. O template publica como artifacts apenas os relatórios normalizados JSON e Markdown; evidências brutas dos scanners não são enviadas.
+## 3. Publicar e fixar a imagem
 
-## Integração no pipeline consumidor
+O workflow de release é acionado por tag `quality-v*`. O primeiro flavor .NET é localizado pela tag:
 
-Copie ou inclua `examples/ci/gitlab-quality-gate.yml` no template central usado pelo projeto consumidor. O job usa o stage `quality`; ajuste apenas o nome do stage se a pipeline central usar outro.
-
-SonarQube e Quality Gate podem rodar em paralelo no mesmo stage. Ambos bloqueiam o merge quando seus jobs são obrigatórios e a opção `Pipelines must succeed` está habilitada. Não existe necessidade técnica de executar o Quality Gate depois do SonarQube.
-
-Para o piloto:
-
-```yaml
-variables:
-  CODE_APPROVAL_QUALITY_ENABLED: "true"
-  CODE_APPROVAL_QUALITY_BLOCKING: "false"
+```text
+ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
 ```
 
-Para ativar o bloqueio após o baseline:
+Após o build, copie o digest real e configure no GitLab:
 
-```yaml
-variables:
-  CODE_APPROVAL_QUALITY_BLOCKING: "true"
+```text
+CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:DIGEST_REAL
 ```
 
-Mantenha coverage desabilitado até que um job anterior publique um arquivo Cobertura em caminho confirmado. Depois disso, habilite:
+Não execute produção com `latest`, `0.2.0` ou apenas `0.2.0-dotnetweb`. A tag localiza o release; o digest imutável executa o job.
 
-```yaml
-variables:
-  CODE_APPROVAL_QUALITY_ENABLE_COVERAGE: "true"
-  CODE_APPROVAL_QUALITY_COVERAGE_REPORT: "TestResults/**/coverage.cobertura.xml"
-  CODE_APPROVAL_QUALITY_MIN_LINE_COVERAGE: "80"
+Mantenha o primeiro package privado enquanto revisa layers, labels, SBOM e proveniência. Se o GHCR continuar privado, use uma conta técnica com somente `read:packages`; armazene o PAT no cofre/runner, nunca no repositório, YAML, imagem, artifact ou log. Tornar o package público é uma decisão irreversível no GHCR.
+
+## 4. Policy corporativa
+
+O runtime exige policy explícita com `schemaVersion: 1` e SHA-256 correspondente. O arquivo não pode ser substituído silenciosamente pelo checkout.
+
+```text
+CODE_APPROVAL_QUALITY_POLICY_FILE=/etc/code-approval-gates/company-policy.json
+CODE_APPROVAL_QUALITY_POLICY_SHA256=<64 caracteres hexadecimais minúsculos>
 ```
 
-PII também começa desabilitado por causa do risco de falsos positivos em fixtures e documentação. A detecção de secrets começa habilitada.
+Distribuição recomendada:
 
-## Critérios de aceite do MVP
+1. arquivo read-only montado pelo runner dedicado;
+2. variável GitLab do tipo File administrada no grupo/projeto, desde que seu arquivo temporário fique fora do checkout.
 
-- uma tag `quality-v*` publica uma imagem versionada no GHCR;
-- a imagem não contém nem instala o Semantic Gate;
-- o GitLab Runner baixa a imagem sem modo privilegiado e sem socket Docker;
-- o job roda somente em Merge Requests destinados a `develop`;
-- os relatórios JSON e Markdown ficam disponíveis mesmo quando o gate reprova;
-- `CODE_APPROVAL_QUALITY_BLOCKING="true"` faz um resultado não aprovado bloquear o merge;
-- SonarQube continua funcionando como gate independente;
-- coverage só é habilitado quando seu artifact existir;
-- nenhuma tag `latest` é usada no pipeline consumidor.
+A policy deve ser um arquivo regular fora da árvore analisada e nenhum componente do path pode ser symlink. Não baixe a policy como artifact dentro de `$CI_PROJECT_DIR`.
 
-## Próximas fases, na ordem recomendada
+O perfil corporativo inicial é fixo em `standard`, threshold `90`, secrets habilitado e modo `full --fail-on-tool-error` no sidecar. A policy não pode desabilitar budgets nem configurá-los acima dos limites `standard`. Waivers fornecidos pelo job/MR são recusados; exceções iniciais devem entrar na policy governada após revisão.
 
-1. Publicar `quality-v0.2.0` e executar o job em modo não bloqueante em três MRs representativos.
-2. Corrigir falhas operacionais da imagem e levantar o baseline de findings.
-3. Confirmar tempo, memória e acesso de rede para as bases do Trivy, Semgrep e OSV Scanner.
-4. Tornar o job bloqueante.
-5. Integrar coverage usando o artifact real do job .NET.
-6. Implementar escopo por diff do GitLab para evitar bloqueio por dívida legada não alterada.
-7. Melhorar a normalização dos resultados do MegaLinter e adicionar relatório CodeClimate, se ainda houver valor após SonarQube.
+Exemplo mínimo, sem `testQuality` ou evidence ainda:
+
+```json
+{
+  "schemaVersion": 1,
+  "budgets": {
+    "maxFileBytes": 2097152,
+    "maxFileLines": 5000,
+    "maxChangedFiles": 100,
+    "maxChangedLines": 20000,
+    "maxDiffBytes": 10485760,
+    "maxBinaryFiles": 20
+  }
+}
+```
+
+Calcule o digest sem imprimir o conteúdo:
+
+```powershell
+(Get-FileHash .\company-policy.json -Algorithm SHA256).Hash.ToLowerInvariant()
+```
+
+## 5. Como o runtime escolhe o código
+
+O launcher corporativo não confia em `CI_PROJECT_DIR`, `CI_COMMIT_SHA` ou `CI_MERGE_REQUEST_DIFF_BASE_SHA` como fonte de verdade:
+
+1. deriva a raiz com `git rev-parse --show-toplevel` a partir do diretório atual;
+2. deriva o head do `HEAD` realmente checado e recusa mismatch com variáveis GitLab presentes;
+3. exige `CODE_APPROVAL_QUALITY_TARGET_BRANCH` governada centralmente;
+4. resolve a base somente de `refs/remotes/origin/<target-branch>`;
+5. compara a target branch declarada pelo GitLab e falha em mismatch;
+6. exige merge-base válido e falha com código `3` se o ref remoto não estiver disponível;
+7. calcula diff, tamanho, linhas, binários e histórico no range governado;
+8. valida que arquivos rastreados e index correspondem ao commit;
+9. rejeita symlinks rastreados/não rastreados, gitlinks/submodules e componentes symlink em `.quality`/output;
+10. materializa arquivos regulares diretamente da árvore do commit com `git archive`, nunca copiando conteúdo mutável do worktree;
+11. exclui arquivos não rastreados da projeção e registra sua contagem no scope manifest;
+12. projeta os arquivos alterados e manifests de suporte sem `.git`, depois chama o sidecar.
+
+O contrato GitLab inicial é `changed` fixo. `resolve_scope` continua suportando `full`/`paths` internamente para o fluxo local, mas o launcher corporativo não aceita `--scope`, `--path`, output customizado, flags de enablement ou report paths. Se `origin/<target>` ainda não puder ser governado/fetchado, não enfraqueça o changed scope: use um full scan por configuração central imutável em uma fase posterior ou mantenha o piloto fora do blocking.
+
+O scope manifest registra `sourceCommit`, base/head/merge-base, `targetBranch`, `sourceMaterialization: git-archive`, arquivos selecionados/suporte, diff/histórico, policy e `excludedUntrackedCount`.
+
+## 6. Template GitLab e SonarQube
+
+Copie/inclua `examples/ci/gitlab-quality-gate.yml` pela configuração central e cadastre fora do YAML do MR:
+
+| Variável | Exemplo | Autoridade |
+| --- | --- | --- |
+| `CODE_APPROVAL_QUALITY_IMAGE` | `ghcr.io/...@sha256:...` | grupo/projeto/policy |
+| `CODE_APPROVAL_QUALITY_POLICY_FILE` | arquivo governado | runner/File variable |
+| `CODE_APPROVAL_QUALITY_POLICY_SHA256` | digest da policy | grupo/projeto/policy |
+| `CODE_APPROVAL_QUALITY_RUNNER_TAG` | runner dedicado | grupo/projeto/policy |
+| `CODE_APPROVAL_QUALITY_TARGET_BRANCH` | `develop` | grupo/projeto/policy |
+| `CODE_APPROVAL_QUALITY_BLOCKING` | `false` no piloto | policy central |
+
+O job usa `GIT_DEPTH: "0"`, `before_script: []`, timeout `2h`, imagem por digest, entrypoint vazio e o usuário non-root da imagem. Ele publica somente:
+
+- `.quality/reports/quality-report.json`;
+- `.quality/reports/quality-report.md`;
+- `.quality/reports/quality-scope.json`.
+
+`examples/ci/gitlab-quality-and-sonarqube.yml` é um overlay: o job de testes produz JUnit/cobertura; o Quality aguarda os testes sem baixar artifacts; o placeholder Sonar deve estender o job corporativo `.company_sonarqube_dotnet`. Não exponha `SONAR_TOKEN` a um job genérico de build que executa código do MR. A instalação do scanner, token, regras para MRs/branches e paths de cobertura pertencem ao job Sonar hardened existente.
+
+Valide o YAML no CI Lint da instância real. O arquivo combinado não é standalone enquanto `.company_sonarqube_dotnet` não vier de um include central.
+
+## 7. Proxy e CA via transporte root-owned
+
+Variáveis proxy/CA vindas do job/MR são ignoradas pelo launcher. Quando necessárias, monte opcionalmente:
+
+```text
+/etc/code-approval/quality-gate-transport.env
+```
+
+O arquivo deve ser `root:root` e modo exato `0444` para ser legível pelo UID `10001`. Aceita comentários `#` e `NAME=value` para:
+
+- `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` e variantes lowercase;
+- `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`.
+
+Não coloque segredo nesse arquivo. URLs de proxy com userinfo ou `@` são recusadas, pois analisadores que processam o MR poderiam ler/exfiltrar credenciais. Certificados devem ser públicos, root-owned e ficar sob `/etc/code-approval/ca`, `/etc/ssl` ou `/usr/local/share/ca-certificates`; nunca monte chave privada.
+
+Os executáveis são pinados, mas alguns inputs continuam mutáveis e dependentes de rede: ruleset `semgrep --config=p/default`, banco do Trivy e dados OSV. O relatório os marca como não pinados/network-required. Não descreva o scan como totalmente reproduzível ou offline.
+
+## 8. Resultado, piloto e rollback
+
+| Exit | Status machine | Significado |
+| ---: | --- | --- |
+| 0 | `APPROVED` | policy atendida |
+| 1 | `REJECTED` | finding/policy reprovou |
+| 2 | `NEEDS_CHANGES` | ferramenta obrigatória ausente/inconclusiva |
+| 3 | erro operacional | Git, config, policy ou runtime inválido |
+
+IDs, chaves JSON, statuses e exits não são traduzidos. `CODE_APPROVAL_QUALITY_LOCALE=pt-BR` ou `en` altera apenas textos humanos suportados; mensagens de scanners permanecem no idioma original.
+
+Comece com `CODE_APPROVAL_QUALITY_BLOCKING=false` e rode pelo menos três MRs: pequeno/saudável, legado/contexto grande e mudança relevante em código/testes/infra. Registre digest, duração, CPU/memória, rede, findings, falsos positivos, suppressions/configs detectadas, comportamento do Sonar e os três artifacts normalizados.
+
+Só considere blocking depois de:
+
+- full smoke real das duas imagens;
+- inventário/hardening dos linters e da execução C#/MSBuild;
+- CI Lint e enforcement central;
+- três MRs advisory aceitos;
+- timeout/recursos calibrados;
+- digest anterior registrado.
+
+Rollback: altere centralmente `CODE_APPROVAL_QUALITY_IMAGE` para o digest anterior, rode CI Lint e valide com um MR. Nunca mova tag. Se necessário, volte temporariamente a `BLOCKING=false` mantendo o job e os relatórios.
+
+## Checklist
+
+- [ ] Runner `linux/amd64`, UID `10001`, sem root/privileged/socket.
+- [ ] Imagem `dotnetweb` publicada, inspecionada e fixada por digest.
+- [ ] Policy externa com `schemaVersion: 1` e SHA governado.
+- [ ] Target branch governada e `refs/remotes/origin/<target>` disponível.
+- [ ] Pipeline Execution Policy/compliance definida antes de blocking.
+- [ ] Transporte proxy/CA, se usado, root-owned `0444` e sem segredo.
+- [ ] CI Lint aprovado com o include Sonar corporativo real.
+- [ ] Full image smoke e scanners obrigatórios validados.
+- [ ] Linters/configs/suppressions/MSBuild inventariados.
+- [ ] Três MRs advisory concluídos e recursos calibrados.
+- [ ] Digest anterior registrado para rollback.
+- [ ] JUnit/cobertura permanecem em GitLab/Sonar até mappings governados.
+- [ ] Blocking ativado somente após aceite explícito do piloto.

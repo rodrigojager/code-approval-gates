@@ -4,10 +4,11 @@ import json
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from .detectors import relative_path
 from .findings import Finding
+from .provenance import json_provenance, junit_provenance, validate_provenance
 from .tools import ToolResult
 
 
@@ -28,6 +29,12 @@ def _json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("root value must be an object")
     return payload
+
+
+def _reject_unknown_keys(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"unknown {label} keys: {', '.join(unknown)}")
 
 
 def _configured_paths(cli_paths: list[str], section: dict[str, Any], field: str = "reports") -> list[str]:
@@ -66,6 +73,7 @@ def _parse_graph(graph: dict[str, Any]) -> tuple[dict[str, str | None], list[tup
         if isinstance(item, str):
             nodes[item] = None
         elif isinstance(item, dict) and item.get("id"):
+            _reject_unknown_keys(item, {"id", "layer"}, "dependency graph node")
             nodes[str(item["id"])] = str(item["layer"]) if item.get("layer") is not None else None
         else:
             raise ValueError("each node must be a string or an object with id")
@@ -74,6 +82,7 @@ def _parse_graph(graph: dict[str, Any]) -> tuple[dict[str, str | None], list[tup
         if isinstance(item, list) and len(item) == 2:
             source, target = str(item[0]), str(item[1])
         elif isinstance(item, dict) and item.get("from") is not None and item.get("to") is not None:
+            _reject_unknown_keys(item, {"from", "to"}, "dependency graph edge")
             source, target = str(item["from"]), str(item["to"])
         else:
             raise ValueError("each edge must be [from, to] or an object with from and to")
@@ -142,6 +151,9 @@ def analyze_dependency_graphs(
     max_fan_in: int | None,
     max_fan_out: int | None,
     allow_cycles: bool,
+    require_provenance: bool = False,
+    expected_source_commit: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> tuple[list[ToolResult], list[Finding], list[dict[str, Any]]]:
     section = policy.get("dependencyGraph") or {}
     if not isinstance(section, dict):
@@ -167,9 +179,33 @@ def analyze_dependency_graphs(
             continue
         try:
             payload = _json(report_path)
+            if payload.get("schemaVersion") != 1:
+                raise ValueError(f"unsupported schemaVersion {payload.get('schemaVersion')}")
+            _reject_unknown_keys(
+                payload,
+                {"$schema", "schemaVersion", "provenance", "name", "nodes", "edges", "graphs", "forbiddenLayerDependencies"},
+                "dependency graph",
+            )
+            provenance = validate_provenance(
+                json_provenance(payload),
+                report_path,
+                required=require_provenance,
+                expected_source_commit=expected_source_commit,
+                max_age_seconds=max_age_seconds,
+            )
             report_findings: list[Finding] = []
             graph_summaries: list[dict[str, Any]] = []
+            if "graphs" not in payload and not {"nodes", "edges"}.issubset(payload):
+                raise ValueError("dependency graph needs nodes and edges, or graphs")
             for graph_index, graph in enumerate(_graph_items(payload)):
+                graph_keys = {"name", "nodes", "edges", "forbiddenLayerDependencies"}
+                if graph is payload:
+                    graph_keys.update({"schemaVersion", "provenance", "$schema"})
+                _reject_unknown_keys(
+                    graph,
+                    graph_keys,
+                    f"dependency graph[{graph_index}]",
+                )
                 nodes, edges = _parse_graph(graph)
                 inbound: dict[str, set[str]] = defaultdict(set)
                 outbound: dict[str, set[str]] = defaultdict(set)
@@ -199,6 +235,11 @@ def analyze_dependency_graphs(
                 for rule_index, rule in enumerate(layer_rules):
                     if not isinstance(rule, dict) or rule.get("from") is None or rule.get("to") is None:
                         raise ValueError(f"forbiddenLayerDependencies[{rule_index}] needs from and to")
+                    _reject_unknown_keys(
+                        rule,
+                        {"from", "to", "severity", "message"},
+                        f"forbiddenLayerDependencies[{rule_index}]",
+                    )
                     source_layer, target_layer = str(rule["from"]), str(rule["to"])
                     for source, target in edges:
                         if nodes[source] == source_layer and nodes[target] == target_layer:
@@ -213,7 +254,7 @@ def analyze_dependency_graphs(
                             ))
                 graph_summaries.append({"name": graph.get("name") or f"graph-{graph_index + 1}", "nodes": len(nodes), "edges": len(edges), "cycles": len(cycle_items), "maxFanIn": max((len(inbound[node]) for node in nodes), default=0), "maxFanOut": max((len(outbound[node]) for node in nodes), default=0)})
             findings.extend(report_findings)
-            summary = {"required": True, "findings": len(report_findings), "graphs": graph_summaries, "limits": {"maxFanIn": fan_in_limit, "maxFanOut": fan_out_limit, "allowCycles": cycles_allowed}}
+            summary = {"required": True, "findings": len(report_findings), "graphs": graph_summaries, "limits": {"maxFanIn": fan_in_limit, "maxFanOut": fan_out_limit, "allowCycles": cycles_allowed}, **provenance}
             results.append(ToolResult(name="dependency-graph", status="findings" if report_findings else "ok", output_path=str(report_path), summary=summary))
             summaries.append({"path": relative_path(report_path, root), **summary})
         except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -222,7 +263,13 @@ def analyze_dependency_graphs(
 
 
 def analyze_evidence_reports(
-    root: Path, cli_paths: list[str], policy: dict[str, Any]
+    root: Path,
+    cli_paths: list[str],
+    policy: dict[str, Any],
+    *,
+    require_provenance: bool = False,
+    expected_source_commit: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> tuple[list[ToolResult], list[Finding], dict[str, Any]]:
     section = policy.get("evidence") or {}
     if not isinstance(section, dict):
@@ -242,15 +289,31 @@ def analyze_evidence_reports(
             continue
         try:
             payload = _json(report_path)
-            if payload.get("schemaVersion", 1) != 1:
+            if payload.get("schemaVersion") != 1:
                 raise ValueError(f"unsupported schemaVersion {payload.get('schemaVersion')}")
-            metrics = payload.get("metrics") or {}
-            checks = payload.get("checks") or []
+            _reject_unknown_keys(
+                payload,
+                {"$schema", "schemaVersion", "provenance", "metrics", "checks"},
+                "quality evidence",
+            )
+            provenance = validate_provenance(
+                json_provenance(payload),
+                report_path,
+                required=require_provenance,
+                expected_source_commit=expected_source_commit,
+                max_age_seconds=max_age_seconds,
+            )
+            if "metrics" not in payload or "checks" not in payload:
+                raise ValueError("quality evidence needs metrics and checks")
+            metrics = payload["metrics"]
+            checks = payload["checks"]
             if not isinstance(metrics, dict) or not isinstance(checks, list):
                 raise ValueError("metrics must be an object and checks must be an array")
             report_findings: list[Finding] = []
             for metric_id, raw in metrics.items():
                 item = raw if isinstance(raw, dict) else {"value": raw}
+                if isinstance(raw, dict):
+                    _reject_unknown_keys(raw, {"value", "path"}, f"metric {metric_id}")
                 metric_value = item.get("value")
                 if isinstance(metric_value, bool) or not isinstance(metric_value, (int, float)):
                     raise ValueError(f"metric {metric_id} value must be numeric")
@@ -258,8 +321,24 @@ def analyze_evidence_reports(
             for index, check in enumerate(checks):
                 if not isinstance(check, dict) or check.get("id") is None:
                     raise ValueError(f"checks[{index}] needs id")
+                _reject_unknown_keys(
+                    check,
+                    {"id", "status", "severity", "category", "path", "message"},
+                    f"checks[{index}]",
+                )
                 status = str(check.get("status") or "error").lower()
-                if status in {"passed", "approved", "ok", "skipped"}:
+                if status in {"passed", "approved", "ok"}:
+                    continue
+                if status == "skipped":
+                    report_findings.append(Finding(
+                        tool="quality-evidence",
+                        rule=f"evidence.check.{check['id']}.skipped",
+                        severity=str(check.get("severity") or "high"),
+                        category=str(check.get("category") or "contract-policy"),
+                        path=str(check.get("path") or ""),
+                        message=str(check.get("message") or f"Required check {check['id']} was skipped."),
+                        metadata={"status": status, "report": relative_path(report_path, root)},
+                    ))
                     continue
                 if status not in {"failed", "rejected", "needs_changes"}:
                     raise ValueError(f"check {check['id']} has unsupported status {status}")
@@ -273,7 +352,7 @@ def analyze_evidence_reports(
                     metadata={"status": status, "report": relative_path(report_path, root)},
                 ))
             findings.extend(report_findings)
-            results.append(ToolResult(name="quality-evidence", status="findings" if report_findings else "ok", output_path=str(report_path), summary={"required": True, "findings": len(report_findings), "metrics": len(metrics), "checks": len(checks)}))
+            results.append(ToolResult(name="quality-evidence", status="findings" if report_findings else "ok", output_path=str(report_path), summary={"required": True, "findings": len(report_findings), "metrics": len(metrics), "checks": len(checks), **provenance}))
         except (OSError, ValueError, json.JSONDecodeError) as error:
             results.append(_required_result("quality-evidence", report_path, "error", f"Invalid evidence report {report_path}: {error}"))
 
@@ -323,6 +402,9 @@ def analyze_test_reports(
     min_tests: int | None,
     max_skipped_tests: int | None,
     max_skipped_percent: float | None,
+    require_provenance: bool = False,
+    expected_source_commit: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> tuple[list[ToolResult], list[Finding], dict[str, Any]]:
     section = policy.get("testQuality") or {}
     if not isinstance(section, dict):
@@ -342,10 +424,18 @@ def analyze_test_reports(
             results.append(_required_result("test-quality", report_path, "missing", f"JUnit report not found: {report_path}"))
             continue
         try:
+            xml_root = ET.parse(report_path).getroot()
             summary = _junit_summary(report_path)
+            provenance = validate_provenance(
+                junit_provenance(xml_root),
+                report_path,
+                required=require_provenance,
+                expected_source_commit=expected_source_commit,
+                max_age_seconds=max_age_seconds,
+            )
             for key in total:
                 total[key] += summary[key]
-            results.append(ToolResult(name="test-quality", status="ok", output_path=str(report_path), summary={"required": True, "findings": 0, **summary}))
+            results.append(ToolResult(name="test-quality", status="ok", output_path=str(report_path), summary={"required": True, "findings": 0, **summary, **provenance}))
         except (OSError, ValueError, ET.ParseError) as error:
             results.append(_required_result("test-quality", report_path, "error", f"Invalid JUnit report {report_path}: {error}"))
     if paths:

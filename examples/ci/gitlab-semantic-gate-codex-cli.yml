@@ -1,3 +1,7 @@
+---
+# LEGACY Semantic-only source-install example. Semantic Gate is preserved but is
+# not part of the standalone corporate Quality image or the current rollout.
+# Run this only on a separately governed runner with the required Codex auth.
 semantic_gate:
   stage: test
   image: node:22
@@ -5,10 +9,19 @@ semantic_gate:
     GIT_DEPTH: "0"
     CODEX_NON_INTERACTIVE: "1"
   before_script:
-    - npm install -g code-approval-gates
+    - printf '%s' "${CODE_APPROVAL_GATES_REF:-}" | grep -Eq '^[0-9a-f]{40}$' || { echo "CODE_APPROVAL_GATES_REF must be a full reviewed commit SHA" >&2; exit 3; }
+    - export CODE_APPROVAL_GATES_TOOL_DIR="$(mktemp -d)"
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" init
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" remote add origin https://github.com/rodrigojager/code-approval-gates.git
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" fetch --depth 1 origin "$CODE_APPROVAL_GATES_REF"
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" checkout --detach FETCH_HEAD
+    - npm --prefix "$CODE_APPROVAL_GATES_TOOL_DIR" ci
+    - npm install -g "$CODE_APPROVAL_GATES_TOOL_DIR"
   script:
     - code-approval-gates doctor semantic --ci --no-interactive
     - code-approval-gates semantic --ci --scope changed --objective-file .quality/objective.md --provider codex-cli --model gpt-5.5 --reasoning-effort high --format json,md --output code-approval-report --no-interactive
+  after_script:
+    - test -z "${CODE_APPROVAL_GATES_TOOL_DIR:-}" || rm -rf -- "$CODE_APPROVAL_GATES_TOOL_DIR"
   artifacts:
     when: always
     paths:

@@ -1,5 +1,8 @@
 {
   "schemaVersion": 1,
+  "provenance": {
+    "requireEvidence": true
+  },
   "budgets": {
     "maxFileBytes": 2097152,
     "maxFileLines": 5000,

@@ -1,14 +1,31 @@
+---
+# LEGACY source-install example for the unified CLI (Quality + Semantic).
+# This is not the recommended corporate Quality job. Prefer
+# gitlab-quality-gate.yml, which uses the digest-pinned standalone image.
+# CODE_APPROVAL_GATES_REF must be a reviewed immutable 40-character commit SHA.
 stages:
   - test
 
-code_approval_gates:
-  stage: test
+.code_approval_source_install:
   image: node:22
   variables:
     GIT_DEPTH: "0"
     CODEX_NON_INTERACTIVE: "1"
   before_script:
-    - npm install -g code-approval-gates
+    - printf '%s' "${CODE_APPROVAL_GATES_REF:-}" | grep -Eq '^[0-9a-f]{40}$' || { echo "CODE_APPROVAL_GATES_REF must be a full commit SHA" >&2; exit 3; }
+    - export CODE_APPROVAL_GATES_TOOL_DIR="$(mktemp -d)"
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" init
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" remote add origin https://github.com/rodrigojager/code-approval-gates.git
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" fetch --depth 1 origin "$CODE_APPROVAL_GATES_REF"
+    - git -C "$CODE_APPROVAL_GATES_TOOL_DIR" checkout --detach FETCH_HEAD
+    - npm --prefix "$CODE_APPROVAL_GATES_TOOL_DIR" ci
+    - npm install -g "$CODE_APPROVAL_GATES_TOOL_DIR"
+  after_script:
+    - test -z "${CODE_APPROVAL_GATES_TOOL_DIR:-}" || rm -rf -- "$CODE_APPROVAL_GATES_TOOL_DIR"
+
+code_approval_gates:
+  extends: .code_approval_source_install
+  stage: test
   script:
     - code-approval-gates doctor --ci --no-interactive
     - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
@@ -21,13 +38,8 @@ code_approval_gates:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
 code_approval_full_scan:
+  extends: .code_approval_source_install
   stage: test
-  image: node:22
-  variables:
-    GIT_DEPTH: "0"
-    CODEX_NON_INTERACTIVE: "1"
-  before_script:
-    - npm install -g code-approval-gates
   script:
     - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
   artifacts:

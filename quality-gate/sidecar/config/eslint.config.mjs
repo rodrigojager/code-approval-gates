@@ -1,6 +1,8 @@
 import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
+// Resolve from MegaLinter's root-owned dependency tree, never from a project
+// checkout or the current working directory.
+const require = createRequire("/node-deps/package.json");
 const js = require("@eslint/js");
 
 export default [

@@ -1,6 +1,6 @@
 {
   "name": "quality-check",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local Docker wrapper for the Code Approval Gates quality-sidecar.",
   "license": "MIT",
   "type": "commonjs",
@@ -9,6 +9,7 @@
     "docker/",
     "sidecar/",
     "examples/",
+    "schemas/",
     "scripts/",
     "skill/",
     "tests/",

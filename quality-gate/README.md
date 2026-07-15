@@ -20,10 +20,10 @@ Path-scoped scan:
 code-approval-gates quality --scope paths --path apps/web --path docs
 ```
 
-GitLab CI:
+GitLab CI uses the standalone image and its container-native entrypoint (after governed policy/image variables are configured centrally):
 
-```powershell
-code-approval-gates quality --ci --scope changed --format json,md --output code-approval-report --no-interactive
+```bash
+/usr/local/bin/quality-ci check
 ```
 
 The lower-level wrapper is still available for advanced/debug use and compatibility. Prefer `code-approval-gates quality` for users, agents, and CI:
@@ -34,7 +34,7 @@ quality-check . --scope full --threshold 90 --format=json,md --output .quality/r
 quality-check . --scope paths --path docs --threshold 90 --format=json,md --output .quality/reports/docs
 ```
 
-Docker is the preferred runtime for full scans. The local wrappers select UID 0 only inside the isolated analysis container so reports can be written to bind mounts regardless of host ownership; the published image remains unprivileged by default. When Docker is not installed, running, or accessible, `quality-check` tries to start Docker automatically and waits for the daemon to become ready. If Docker does not come up within the timeout, it runs the bundled Python sidecar locally in `offline` mode. Pass `--no-start-docker` to skip startup, `--docker-start-timeout-ms <ms>` to tune the wait, and `--mode quick`, `--mode offline`, or `--mode full` to choose the sidecar mode explicitly.
+Docker is the preferred runtime for full scans. Local wrappers may select UID 0 only inside their isolated analysis container so reports can be written to bind mounts; the published corporate image remains unprivileged. The default `full` mode fails explicitly when required tools are unavailable and never downgrades itself to an offline approval. Pass `--no-start-docker` to skip Docker startup, `--docker-start-timeout-ms <ms>` to tune the wait, and select `--mode quick` or `--mode offline` explicitly only for local/diagnostic use.
 
 `--path` requires `--scope paths`. For `changed` and `full`, use `--exclude`, `--include`, or ignore files to filter.
 
@@ -83,6 +83,8 @@ Every limit can be overridden from the CLI or `quality.budgets` in `.code-approv
 code-approval-gates quality --scope changed --profile strict --max-file-lines 1500 --max-changed-files 40
 quality-check . --scope changed --max-diff-bytes 5242880 --max-binary-files 5
 ```
+
+Those overrides are for local/general CLI use. The corporate `quality-ci` boundary deliberately does not expose budget-disable or ad-hoc allow flags and rejects policy values that weaken its selected standard/strict profile.
 
 The JSON and Markdown reports include a `metrics` section with observed values and effective budgets. Budget and policy findings are blockers unless allowed by the existing `--allow-rule`, `--allow-path`, or waiver mechanisms.
 
@@ -137,30 +139,33 @@ If a requested evidence file is missing or invalid, the gate returns `NEEDS_CHAN
 
 ## Standalone GitLab container
 
-The repository publishes the deterministic gate as a standalone, versioned image:
+The image contains a dedicated, fixed-contract `quality-ci` entrypoint for GitLab Docker executors. It never starts Docker itself:
 
-```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0
+```bash
+/usr/local/bin/quality-ci check
 ```
 
-The GitHub workflow `.github/workflows/quality-gate-image.yml` validates image builds in Pull Requests with read-only repository permissions. It publishes to GHCR only for `quality-v*` tags, using the job-scoped `GITHUB_TOKEN`; no personal access token is required for publication.
+The corporate launcher accepts no project-controlled scope/path/output/enablement/report flags. It derives repository root and head from the current Git checkout, rejects mismatching GitLab context, and resolves base only from `refs/remotes/origin/$CODE_APPROVAL_QUALITY_TARGET_BRANCH`. It ignores `CI_MERGE_REQUEST_DIFF_BASE_SHA` as authority and fails with operational exit `3` when the governed ref or merge-base is unavailable.
 
-Use `examples/ci/gitlab-quality-gate.yml` to run the image directly with the GitLab Docker executor. The job calls `quality-sidecar` inside the container and does not require Docker-in-Docker, a privileged runner, the Docker socket, npm installation, or the Semantic Gate.
+The GitLab template calls `/usr/local/bin/quality-ci` by absolute path so a file or `PATH` entry from the Merge Request cannot replace the image-installed launcher.
 
-The image defaults to the unprivileged `quality` user. The GitLab template explicitly selects UID 0 only inside the isolated job container so it can write reports to checkout mounts with different host ownership models. This requires a GitLab/Runner version that supports `image:docker:user`. It does not grant host-level root access: the supported runner contract keeps `privileged = false`, does not mount the Docker socket, and restricts the allowed image. The template uploads only the normalized JSON and Markdown reports; raw scanner evidence remains local to the job and Gitleaks redacts detected values.
+Tracked source must match the commit. Symlinks and gitlinks are rejected, untracked files are excluded and counted, and changed files plus support manifests are materialized directly from the commit with `git archive` into a temporary projection without `.git`. The launcher never deliberately invokes project tests/build scripts; analyzers can still evaluate MR-controlled configs/toolchains/MSBuild, so the initial rollout remains advisory.
 
-The sidecar accepts the deterministic policy options used by the template:
+The initial corporate boundary deliberately does not accept JUnit, coverage, dependency, or evidence paths from job/MR variables. Keep those signals in GitLab/Sonar until mappings are supplied by root-owned configuration or governed policy. Job/MR waivers are also rejected.
 
-- `--threshold <number>`;
-- `--profile relaxed|standard|strict`;
-- `--enable-secrets`;
-- `--enable-pii`;
-- `--enable-coverage`;
-- `--coverage-report <path>`;
-- `--min-line-coverage <number>`;
-- `--min-branch-coverage <number>`;
-- `--fail-on-tool-error`.
+Corporate CI requires an explicit `schemaVersion: 1` policy plus its SHA-256. The regular file must be outside the analyzed checkout and must not traverse symlink components. `quality-ci` uses the fixed standard/90 contract and rejects disabled or weakened budgets:
 
-jscpd evaluates source-code duplication and excludes Markdown documentation. This avoids treating intentionally repeated bilingual command examples as production code clones while keeping duplication checks active for implementation files.
+```text
+CODE_APPROVAL_QUALITY_POLICY_FILE=/etc/code-approval-gates/company-policy.json
+CODE_APPROVAL_QUALITY_POLICY_SHA256=<sha256>
+```
 
-The initial GitLab rollout is non-blocking so the team can establish a baseline. Set `CODE_APPROVAL_QUALITY_BLOCKING` to `"true"` only after operational errors and legacy findings have been reviewed. See `docs/plano-gitlab-quality-gate.md` and `docs/proximos-passos-publicacao-segura.md` for the rollout and credential-handling procedures.
+The release workflow builds `generic` and `dotnetweb` flavors. The initial .NET artifact is named `0.2.0-dotnetweb`, but production GitLab jobs must pin its published digest:
+
+```text
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-dotnetweb-digest>
+```
+
+Use `examples/ci/gitlab-quality-gate.yml`. The image runs as UID/GID `10001`; the job uses no root override, DinD, privileged runner, Docker socket, npm install, or Semantic Gate and uploads only normalized JSON, Markdown, and scope-manifest artifacts. `examples/ci/gitlab-quality-and-sonarqube.yml` is an overlay that must extend the company's hardened Sonar job.
+
+The initial rollout is non-blocking. Ordinary repository YAML is not an enforcement boundary; use Pipeline Execution Policy/compliance CI before blocking. MegaLinter per-analyzer configs/suppressions and C#/MSBuild behavior still require an inventory and full image smoke. The complete PT-BR tutorial is `docs/plano-gitlab-quality-gate.md`; English is `docs/gitlab-quality-gate.en.md`; safe release steps are in `docs/proximos-passos-publicacao-segura.md`.

@@ -1,0 +1,46 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      root-npm:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /semantic-gate
+    schedule:
+      interval: weekly
+    groups:
+      semantic-gate-npm:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /quality-gate
+    schedule:
+      interval: weekly
+    groups:
+      quality-gate-npm:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /quality-gate
+    schedule:
+      interval: weekly
+    groups:
+      quality-sidecar-python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /quality-gate
+    schedule:
+      interval: weekly

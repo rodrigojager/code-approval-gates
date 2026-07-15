@@ -1,9 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
-if [[ "${1:-}" == "quality-sidecar" || "${1:-}" == "quality-check" ]]; then
-  shift
-fi
+case "${1:-}" in
+  quality-sidecar|quality-check)
+    shift
+    ;;
+  quality-ci)
+    shift
+    exec /usr/local/bin/quality-ci "$@"
+    ;;
+esac
 
-exec python3 -m quality_sidecar "$@"
-
+exec /opt/venvs/quality-sidecar/bin/python -m quality_sidecar "$@"
