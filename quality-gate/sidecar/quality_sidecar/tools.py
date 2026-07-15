@@ -509,12 +509,21 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
 
 
 def _megalinter_exclude_regex(root: Path) -> str:
-    root_text = root.resolve().as_posix().rstrip("/") or "/"
-    escaped_root = re.escape(root_text)
     # Match dependency/output directories only below the analyzed root. A
     # plain `tmp/` expression also matched the `/tmp/...` smoke/GitLab mount
-    # prefix and silently reduced MegaLinter to a zero-file run.
-    return rf"^{escaped_root}/(?:.*?/)?(?:\.quality|node_modules|coverage|dist|tmp)(?:/|$)"
+    # prefix and silently reduced MegaLinter to a zero-file run. Windows may
+    # expose the same temporary directory through short and canonical path
+    # spellings, so accept both without broadening the match outside the root.
+    root_candidates = {
+        (root if root.is_absolute() else root.absolute()).as_posix().rstrip("/") or "/",
+        root.resolve().as_posix().rstrip("/") or "/",
+    }
+    directory_suffix = r"(?:.*?/)?(?:\.quality|node_modules|coverage|dist|tmp)(?:/|$)"
+    alternatives = [
+        rf"{'' if candidate == '/' else re.escape(candidate)}/{directory_suffix}"
+        for candidate in sorted(root_candidates)
+    ]
+    return rf"^(?:{'|'.join(alternatives)})"
 
 
 def _megalinter_rules_path(root: Path) -> str:
