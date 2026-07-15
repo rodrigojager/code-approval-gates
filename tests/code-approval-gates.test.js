@@ -713,6 +713,12 @@ test("package metadata and README point users to the unified CLI", () => {
   assert.equal(pkg.scripts["test:semantic"], "npm --prefix semantic-gate test --workspaces=false");
   assert.equal(pkg.scripts["test:semantic:build"], "npm --prefix semantic-gate run test:build --workspaces=false");
   assert.match(verifyScript, /npm run test:build --workspaces=false/);
+  assert.match(verifyScript, /python -m pip install[^\n]*defusedxml==0\.7\.1/);
+  assert.ok(
+    verifyScript.indexOf("defusedxml==0.7.1") <
+      verifyScript.indexOf("Invoke-Native npm run test:root"),
+    "Python sidecar dependencies must be installed before root end-to-end tests"
+  );
   assert.ok(
     verifyScript.indexOf("Invoke-Native npm run build --workspaces=false") <
       verifyScript.indexOf("Invoke-Native npm run test:root"),

@@ -54,6 +54,11 @@ try {
   }
   New-Item -ItemType Directory -Path $verifyDir | Out-Null
 
+  # Root end-to-end tests execute the bundled Python sidecar in quick mode.
+  # Install its sole runtime dependency before those tests in a pristine CI
+  # environment; the quality workspace test repeats this idempotently later.
+  Invoke-Native python -m pip install --disable-pip-version-check --quiet "defusedxml==0.7.1"
+
   # Root tests exercise `doctor semantic`, which intentionally verifies the
   # compiled semantic wrapper. Bootstrap that workspace first so a pristine
   # checkout is tested in the same valid state as an installed checkout.
