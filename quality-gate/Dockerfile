@@ -1,10 +1,42 @@
 # syntax=docker/dockerfile:1.7
 
+ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.5.0@sha256:00830d91da662d05221c1c0005f9010416030bd1da89afbcb55a9c52945ebd48
+ARG GITLEAKS_BUILDER_IMAGE=golang:1.25.7-alpine3.23@sha256:724e212d86d79b45b7ace725b44ff3b6c2684bfd3131c43d5d60441de151d98e
+ARG GITLEAKS_INSTALL_VERSION=8.30.1
+ARG GITLEAKS_SOURCE_COMMIT=83d9cd684c87d95d656c1458ef04895a7f1cbd8e
+ARG GITLEAKS_SOURCE_SHA256=6b2638a733b85619dc80bdf28e84e4fed7e526a761ab5c148fbf67695aea2115
+
+# Rebuild the released Gitleaks source with the first Go 1.25 patch that fixes
+# CVE-2025-68121. The upstream v8.30.1 binary was compiled with Go 1.24.11.
+FROM ${GITLEAKS_BUILDER_IMAGE} AS gitleaks-builder
+
+ARG GITLEAKS_INSTALL_VERSION
+ARG GITLEAKS_SOURCE_COMMIT
+ARG GITLEAKS_SOURCE_SHA256
+
+RUN set -eux; \
+    apk add --no-cache ca-certificates curl tar; \
+    mkdir -p /src/gitleaks /out; \
+    curl -sSfL \
+      "https://github.com/gitleaks/gitleaks/archive/${GITLEAKS_SOURCE_COMMIT}.tar.gz" \
+      -o /tmp/gitleaks-source.tar.gz; \
+    printf '%s  %s\n' "${GITLEAKS_SOURCE_SHA256}" /tmp/gitleaks-source.tar.gz | sha256sum -c -; \
+    tar -xzf /tmp/gitleaks-source.tar.gz -C /src/gitleaks --strip-components=1; \
+    cd /src/gitleaks; \
+    go mod download; \
+    CGO_ENABLED=0 go build \
+      -trimpath \
+      -tags gore2regex \
+      -ldflags "-s -w -buildid= -X=github.com/zricethezav/gitleaks/v8/version.Version=${GITLEAKS_INSTALL_VERSION}" \
+      -o /out/gitleaks \
+      ./main.go; \
+    test "$(/out/gitleaks version | head -n 1)" = "${GITLEAKS_INSTALL_VERSION}"; \
+    go version -m /out/gitleaks | grep -F ': go1.25.7'
+
 # The portable image is the default. CI passes the pinned dotnetweb image and
 # QUALITY_GATE_FLAVOR=dotnetweb for the first company-oriented publication.
 # Keep the v9.5/Alpine 3.23 base until a released Semgrep build contains the
 # upstream OCaml fix for musl 1.2.6 signal stacks on affected Intel CPUs.
-ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.5.0@sha256:00830d91da662d05221c1c0005f9010416030bd1da89afbcb55a9c52945ebd48
 FROM ${MEGALINTER_IMAGE}
 
 USER root
@@ -16,8 +48,7 @@ ARG JSCPD_INSTALL_VERSION=5.0.12
 ARG SEMGREP_INSTALL_VERSION=1.169.0
 ARG TRIVY_INSTALL_VERSION=0.72.0
 ARG TRIVY_INSTALL_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea
-ARG GITLEAKS_INSTALL_VERSION=8.30.1
-ARG GITLEAKS_INSTALL_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG GITLEAKS_INSTALL_VERSION
 ARG OSV_SCANNER_INSTALL_VERSION=2.4.0
 ARG OSV_SCANNER_INSTALL_SHA256=15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
 ARG TERRASCAN_INSTALL_VERSION=1.19.9
@@ -67,10 +98,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # MegaLinter v9.5 keeps its .NET global tools below /root and places its
 # bundled Node tools ahead of /usr/local/bin. The production user cannot
-# traverse /root, and that ordering would also shadow our pinned JSCPD. Copy
-# the .NET tool store to an immutable location and put every gate-owned pin
-# first without granting runtime access to /root. The smaller flavor copies
-# here so its cached toolchain remains independent from the generic image.
+# traverse /root, and that ordering would also shadow our pinned JSCPD. The
+# dotnetweb gate enables an explicit linter allowlist, so remove inherited
+# analyzers outside that allowlist before copying the required .NET tools.
+# This also removes their unreachable vulnerable runtimes from the image.
 RUN set -eux; \
     mkdir -p \
       /opt/megalinter-dotnet-tools \
@@ -78,6 +109,23 @@ RUN set -eux; \
       /opt/megalinter-rust-toolchain/bin; \
     if [[ "${QUALITY_GATE_FLAVOR}" == "dotnetweb" ]]; then \
       test -d /root/.dotnet/tools; \
+      for unused_binary in editorconfig-checker kubeconform ls-lint protolint; do \
+        rm -f "/usr/bin/${unused_binary}"; \
+        ! command -v "${unused_binary}"; \
+      done; \
+      test -d /root/.dotnet/tools/.store/tsqllint; \
+      rm -rf \
+        /root/.dotnet/tools/.store/tsqllint \
+        /root/.dotnet/tools/tsqllint; \
+      test -d /node-deps/node_modules/gherkin-lint; \
+      test -d /node-deps/node_modules/protobufjs; \
+      npm pkg delete 'dependencies.gherkin-lint' --prefix /node-deps; \
+      rm -rf \
+        /node-deps/node_modules/gherkin-lint \
+        /node-deps/node_modules/gherkin \
+        /node-deps/node_modules/cucumber-messages \
+        /node-deps/node_modules/protobufjs; \
+      node -e 'const p = require("/node-deps/package.json"); if (p.dependencies?.["gherkin-lint"]) process.exit(1)'; \
       cp -al /root/.dotnet/tools/. /opt/megalinter-dotnet-tools/; \
     fi; \
     chown -R root:root \
@@ -156,16 +204,8 @@ RUN set -eux; \
     /opt/venvs/checkov/bin/pip check; \
     ln -sf /opt/venvs/checkov/bin/checkov /usr/local/bin/checkov
 
-RUN set -eux; \
-  version="${GITLEAKS_INSTALL_VERSION#v}"; \
-  release_arch="x64"; \
-  curl -sSfL \
-    "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_${release_arch}.tar.gz" \
-    -o /tmp/gitleaks.tar.gz; \
-  printf '%s  %s\n' "${GITLEAKS_INSTALL_SHA256}" /tmp/gitleaks.tar.gz | sha256sum -c -; \
-  tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks; \
-  chmod +x /usr/local/bin/gitleaks; \
-  rm /tmp/gitleaks.tar.gz
+RUN rm -f /usr/bin/gitleaks
+COPY --from=gitleaks-builder --chown=0:0 --chmod=0555 /out/gitleaks /usr/local/bin/gitleaks
 
 RUN set -eux; \
   version="${TRIVY_INSTALL_VERSION#v}"; \
@@ -258,6 +298,13 @@ RUN set -eux; \
       test "$(command -v roslynator)" = "/opt/megalinter-dotnet-tools/roslynator"; \
       csharpier --version >/dev/null; \
       roslynator --version >/dev/null; \
+      for unused_binary in editorconfig-checker kubeconform ls-lint protolint tsqllint; do \
+        ! command -v "${unused_binary}"; \
+      done; \
+      test ! -e /root/.dotnet/tools/.store/tsqllint; \
+      test ! -e /opt/megalinter-dotnet-tools/.store/tsqllint; \
+      test ! -e /node-deps/node_modules/gherkin-lint; \
+      test ! -e /node-deps/node_modules/protobufjs; \
     else \
       for tool in csharpier devskim roslynator tsqllint; do \
         test "$(command -v "${tool}")" = "/opt/megalinter-dotnet-tools/${tool}"; \
@@ -286,6 +333,8 @@ RUN set -eux; \
     test -x /entrypoint.sh; \
     test -x /opt/quality-sidecar/entrypoint.sh; \
     test -x /usr/local/bin/quality-ci; \
+    test "$(stat -c '%u:%g:%a' /usr/local/bin/gitleaks)" = "0:0:555"; \
+    test ! -e /usr/bin/gitleaks; \
     test "$(stat -c '%u:%g:%a' /etc/code-approval/quality-gate-flavor)" = "0:0:444"; \
     test "$(stat -c '%u:%g:%a' /etc/code-approval/quality-gate-path)" = "0:0:444"; \
     test "$(stat -c '%u:%g:%a' /etc/code-approval/quality-gate-transport.env)" = "0:0:444"; \
