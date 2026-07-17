@@ -311,6 +311,7 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("full-clean", workflow)
         self.assertIn("tool-error", workflow)
         self.assertIn("aquasecurity/trivy-action@", workflow)
+        self.assertEqual(workflow.count("timeout: 15m"), 2)
         self.assertIn("Enforce no fixed critical OS vulnerabilities", workflow)
         self.assertIn("Block releases on any fixed critical vulnerability", workflow)
         self.assertIn("trivy-critical-${{ matrix.flavor }}", workflow)
