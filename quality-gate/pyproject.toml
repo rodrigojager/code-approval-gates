@@ -1,14 +1,18 @@
 [project]
 name = "code-approval-quality-sidecar"
-version = "0.1.0"
+version = "0.2.0"
 description = "Container-side quality gate runner for Code Approval Gates projects."
 requires-python = ">=3.11"
 license = { text = "MIT" }
+dependencies = [
+  "defusedxml==0.7.1",
+]
 
 [project.scripts]
 quality-sidecar = "quality_sidecar.cli:entrypoint"
 quality-check = "quality_sidecar.cli:entrypoint"
 quality-check-internal = "quality_sidecar.cli:entrypoint"
+quality-ci = "quality_sidecar.ci:entrypoint"
 
 [tool.setuptools]
 package-dir = { "" = "sidecar" }

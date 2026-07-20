@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 const {
   DEFAULT_IMAGE,
@@ -15,9 +16,26 @@ const {
   isDockerAvailable,
   ensureDockerAvailable,
   canBuildBundledImage,
+  resolveGitRange,
   resolveScopeFiles,
-  helpText
+  helpText,
+  runDockerWrapper,
+  writeEmptyQualityReport
 } = require("../bin/quality-check.js");
+
+function createSampleTarget(prefix = "quality-check-wrapper-") {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const target = path.join(temp, "target");
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  return target;
+}
+
+function dockerVersionResponse(attempt) {
+  return attempt >= 2
+    ? { status: 0, stdout: "28.1.1\n", stderr: "" }
+    : { status: 1, stdout: "", stderr: "Docker unavailable" };
+}
 
 test("parseArgs keeps quality gate flags for the container", () => {
   const parsed = parseArgs([
@@ -139,7 +157,8 @@ test("help text documents ignore re-inclusion", () => {
   assert.match(helpText(), /supports !path re-inclusion/);
   assert.match(helpText(), /Add a path for scope=paths/);
   assert.match(helpText(), /Local fallback:/);
-  assert.match(helpText(), /bundled Python sidecar runs locally in offline mode/);
+  assert.match(helpText(), /keeps full mode by default/);
+  assert.match(helpText(), /explicitly to opt into a reduced-evidence scan/);
   assert.doesNotMatch(helpText(), /Limit changed\/full context/);
 });
 
@@ -172,12 +191,15 @@ test("buildDockerArgs creates the expected sidecar invocation", () => {
   const parsed = parseArgs(["sample-project", "--threshold", "90"], {});
   const dockerArgs = buildDockerArgs(parsed, targetPath);
 
-  assert.deepEqual(dockerArgs.slice(0, 2), ["run", "--rm"]);
+  assert.deepEqual(dockerArgs.slice(0, 4), ["run", "--rm", "--user", "0"]);
+  assert.ok(dockerArgs.includes("QUALITY_CHECK_SCOPE=changed"));
   assert.ok(dockerArgs.includes(`${targetPath}:/workspace`));
   assert.ok(dockerArgs.includes(`${path.join(targetPath, ".quality", "reports")}:/workspace/.quality/reports`));
   assert.ok(dockerArgs.includes("--output"));
   assert.ok(dockerArgs.includes(".quality/reports"));
-  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--scope-manifest"));
+  assert.ok(dockerArgs.includes(".quality/reports/quality-scope.json"));
+  assert.deepEqual(dockerArgs.slice(-2), ["--threshold", "90"]);
 });
 
 test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () => {
@@ -189,9 +211,11 @@ test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () =
   assert.deepEqual(args.slice(0, 4), ["-m", "quality_sidecar", "check", targetPath]);
   assert.ok(args.includes("--output"));
   assert.ok(args.includes(reportsPath));
+  assert.ok(args.includes("--scope-manifest"));
+  assert.ok(args.includes(path.join(reportsPath, "quality-scope.json")));
   assert.ok(args.includes("--mode"));
-  assert.ok(args.includes("offline"));
-  assert.deepEqual(args.slice(-4), ["--threshold", "90", "--mode", "offline"]);
+  assert.ok(args.includes("full"));
+  assert.deepEqual(args.slice(-4), ["--threshold", "90", "--mode", "full"]);
 
   const explicitMode = buildLocalSidecarArgs(
     parseArgs(["sample-project", "--mode", "quick"], {}),
@@ -200,6 +224,46 @@ test("buildLocalSidecarArgs creates the bundled Python sidecar invocation", () =
   );
   assert.equal(explicitMode.filter((arg) => arg === "--mode").length, 1);
   assert.ok(explicitMode.includes("quick"));
+
+  const explicitOffline = buildLocalSidecarArgs(
+    parseArgs(["sample-project", "--mode", "offline"], {}),
+    targetPath,
+    reportsPath
+  );
+  assert.equal(explicitOffline.filter((arg) => arg === "--mode").length, 1);
+  assert.ok(explicitOffline.includes("offline"));
+});
+
+test("resolveGitRange prefers GitLab's exact merge request diff base SHA", () => {
+  const parsed = parseArgs([], {
+    GITLAB_CI: "true",
+    CI_MERGE_REQUEST_DIFF_BASE_SHA: "abc123",
+    CI_MERGE_REQUEST_TARGET_BRANCH_NAME: "main",
+    CI_COMMIT_SHA: "def456"
+  });
+  assert.deepEqual(resolveGitRange(parsed), { base: "abc123", head: "def456" });
+});
+
+test("resolveGitRange uses explicit GitHub pull request refs", () => {
+  const parsed = parseArgs([".", "--scope", "changed"], {
+    GITHUB_BASE_REF: "main",
+    GITHUB_SHA: "0123456789abcdef"
+  });
+
+  assert.deepEqual(resolveGitRange(parsed), {
+    base: "origin/main",
+    head: "0123456789abcdef"
+  });
+});
+
+test("resolveGitRange rejects option-like, empty, and control-character refs before Git runs", () => {
+  for (const args of [["--base=-c"], ["--base="], ["--head=bad\nref"]]) {
+    assert.throws(
+      () => resolveGitRange(parseArgs(args, {})),
+      (error) => error.code === "INVALID_GIT_REF" && error.exitCode === 3 && error.details.commands.length === 0
+    );
+  }
+  assert.throws(() => parseArgs(["--base", "--output=/tmp/report"], {}), /Missing value for --base/);
 });
 
 test("commandLine quotes paths with spaces for debug output", () => {
@@ -226,9 +290,7 @@ test("ensureDockerAvailable starts Docker and waits for readiness", () => {
   const runner = (command, args) => {
     if (command === "docker" && args[0] === "version") {
       versionChecks += 1;
-      return versionChecks >= 2
-        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
-        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+      return dockerVersionResponse(versionChecks);
     }
     return { status: 3 };
   };
@@ -243,18 +305,10 @@ test("ensureDockerAvailable starts Docker and waits for readiness", () => {
 });
 
 test("runDockerWrapper propagates docker run exit code", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget();
   const calls = [];
-  const runner = (command, args) => {
-    calls.push([command, args]);
+  const runner = (command, args, options) => {
+    calls.push([command, args, options]);
     if (args[0] === "version") {
       return { status: 0, stdout: "28.1.1\n", stderr: "" };
     }
@@ -276,20 +330,14 @@ test("runDockerWrapper propagates docker run exit code", () => {
   assert.ok(dockerArgs.includes("example/sidecar:test"));
   assert.ok(dockerArgs.includes("--output"));
   assert.ok(dockerArgs.includes(".quality/reports"));
-  assert.deepEqual(dockerArgs.slice(-4), ["--output", ".quality/reports", "--threshold", "90"]);
+  assert.ok(dockerArgs.includes("--scope-manifest"));
+  assert.ok(dockerArgs.includes(".quality/reports/quality-scope.json"));
+  assert.deepEqual(dockerArgs.slice(-2), ["--threshold", "90"]);
   assert.ok(fs.existsSync(path.join(target, ".quality", "reports")));
 });
 
 test("runDockerWrapper builds bundled image when default image is missing", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget();
   const calls = [];
   const runner = (command, args) => {
     calls.push([command, args]);
@@ -314,19 +362,11 @@ test("runDockerWrapper builds bundled image when default image is missing", () =
   assert.ok(calls.some(([, args]) => args[0] === "run"));
 });
 
-test("runDockerWrapper falls back to local sidecar when Docker is unavailable", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-local-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+test("runDockerWrapper keeps full mode when Docker is unavailable", () => {
+  const target = createSampleTarget("quality-check-wrapper-local-");
   const calls = [];
-  const runner = (command, args) => {
-    calls.push([command, args]);
+  const runner = (command, args, options) => {
+    calls.push([command, args, options]);
     if (command === "docker" && args[0] === "version") {
       return { status: 1, stdout: "", stderr: "Docker unavailable" };
     }
@@ -342,19 +382,86 @@ test("runDockerWrapper falls back to local sidecar when Docker is unavailable", 
   const localCall = calls.find(([, args]) => args[0] === "-m" && args[1] === "quality_sidecar");
   assert.ok(localCall);
   assert.ok(localCall[1].includes("--mode"));
-  assert.ok(localCall[1].includes("offline"));
+  assert.ok(localCall[1].includes("full"));
+  assert.equal(localCall[1].includes("offline"), false);
+  assert.equal(localCall[2].env.QUALITY_CHECK_SCOPE, "full");
+});
+
+test("runDockerWrapper reports an invalid Git range as an operational error", () => {
+  const target = createSampleTarget("quality-check-invalid-range-");
+  const git = (...args) => spawnSync("git", args, { cwd: target, encoding: "utf8" });
+  assert.equal(git("init").status, 0);
+  assert.equal(git("config", "user.name", "Quality Test").status, 0);
+  assert.equal(git("config", "user.email", "quality@example.invalid").status, 0);
+  assert.equal(git("add", ".").status, 0);
+  assert.equal(git("commit", "-m", "initial").status, 0);
+  let runtimeCalled = false;
+  const runner = () => {
+    runtimeCalled = true;
+    return { status: 0 };
+  };
+
+  try {
+    const exitCode = runDockerWrapper([
+      target,
+      "--scope", "changed",
+      "--base", "missing-base-ref",
+      "--head", "HEAD",
+      "--no-start-docker"
+    ], {}, runner);
+    assert.equal(exitCode, 3);
+    assert.equal(runtimeCalled, false);
+    const reports = path.join(target, ".quality", "reports");
+    const scope = JSON.parse(fs.readFileSync(path.join(reports, "quality-scope.json"), "utf8"));
+    const report = JSON.parse(fs.readFileSync(path.join(reports, "quality-report.json"), "utf8"));
+    assert.equal(scope.schemaVersion, 1);
+    assert.equal(scope.resolution.status, "error");
+    assert.equal(scope.resolution.code, "GIT_SCOPE_RESOLUTION_FAILED");
+    assert.equal(scope.diff.status, "error");
+    assert.equal(report.status, "ERROR");
+    assert.equal(report.exitCode, 3);
+    assert.equal(report.error.code, "GIT_SCOPE_RESOLUTION_FAILED");
+    assert.equal(report.score.value, null);
+  } finally {
+    fs.rmSync(path.dirname(target), { recursive: true, force: true });
+  }
+});
+
+test("runDockerWrapper approves a genuinely empty valid Git range", () => {
+  const target = createSampleTarget("quality-check-empty-range-");
+  const git = (...args) => spawnSync("git", args, { cwd: target, encoding: "utf8" });
+  assert.equal(git("init").status, 0);
+  assert.equal(git("config", "user.name", "Quality Test").status, 0);
+  assert.equal(git("config", "user.email", "quality@example.invalid").status, 0);
+  assert.equal(git("add", ".").status, 0);
+  assert.equal(git("commit", "-m", "initial").status, 0);
+
+  try {
+    const exitCode = runDockerWrapper([
+      target,
+      "--scope", "changed",
+      "--base", "HEAD",
+      "--head", "HEAD",
+      "--no-start-docker"
+    ], {}, () => {
+      throw new Error("Runtime must not run for an empty valid scope");
+    });
+    assert.equal(exitCode, 0);
+    const reports = path.join(target, ".quality", "reports");
+    const scope = JSON.parse(fs.readFileSync(path.join(reports, "quality-scope.json"), "utf8"));
+    const report = JSON.parse(fs.readFileSync(path.join(reports, "quality-report.json"), "utf8"));
+    assert.equal(scope.schemaVersion, 1);
+    assert.equal(scope.resolution.status, "available");
+    assert.equal(scope.diff.status, "available");
+    assert.equal(report.status, "APPROVED");
+    assert.equal(report.exitCode, 0);
+  } finally {
+    fs.rmSync(path.dirname(target), { recursive: true, force: true });
+  }
 });
 
 test("runDockerWrapper starts Docker automatically before running the container", () => {
-  const {
-    runDockerWrapper
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-check-wrapper-start-docker-"));
-  const target = path.join(temp, "target");
-  fs.mkdirSync(target);
-  fs.writeFileSync(path.join(target, "sample.js"), "const value = 1;\n", "utf8");
+  const target = createSampleTarget("quality-check-wrapper-start-docker-");
   let versionChecks = 0;
   const starts = [];
   const calls = [];
@@ -362,9 +469,7 @@ test("runDockerWrapper starts Docker automatically before running the container"
     calls.push([command, args]);
     if (command === "docker" && args[0] === "version") {
       versionChecks += 1;
-      return versionChecks >= 2
-        ? { status: 0, stdout: "28.1.1\n", stderr: "" }
-        : { status: 1, stdout: "", stderr: "Docker unavailable" };
+      return dockerVersionResponse(versionChecks);
     }
     if (args[0] === "image") {
       return { status: 0 };
@@ -390,11 +495,6 @@ test("canBuildBundledImage validates packaged build context", () => {
 });
 
 test("writeEmptyQualityReport creates scoped approved report", () => {
-  const {
-    writeEmptyQualityReport
-  } = require("../bin/quality-check.js");
-  const fs = require("node:fs");
-  const os = require("node:os");
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "quality-empty-report-"));
   try {
     writeEmptyQualityReport(temp, {

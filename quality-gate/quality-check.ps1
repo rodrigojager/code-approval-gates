@@ -39,7 +39,7 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
   $arg = $RawArgs[$i]
 
   if ($arg -in @("--image", "-Image", "-image")) {
-    $Image = TakeValue $RawArgs $i $arg
+    $Image = TakeValue -Items $RawArgs -Index $i -Flag $arg
     $i++
     continue
   }
@@ -75,7 +75,7 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
   }
 
   if ($arg -in @("--docker-arg", "-DockerArg", "-dockerArg")) {
-    $DockerArgs.Add((TakeValue $RawArgs $i $arg $true))
+    $DockerArgs.Add((TakeValue -Items $RawArgs -Index $i -Flag $arg -AllowFlagValue $true))
     $i++
     continue
   }
@@ -87,7 +87,7 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
 
   if ($arg -eq "--format") {
     $ContainerArgs.Add($arg)
-    $ContainerArgs.Add((NormalizeFormatValue (TakeValue $RawArgs $i $arg)))
+    $ContainerArgs.Add((NormalizeFormatValue (TakeValue -Items $RawArgs -Index $i -Flag $arg)))
     $i++
     continue
   }
@@ -187,6 +187,10 @@ if ($Build -and -not (TestDockerImage $Image)) {
 $RunArgs = New-Object System.Collections.Generic.List[string]
 $RunArgs.Add("run")
 $RunArgs.Add("--rm")
+$RunArgs.Add("--user")
+$RunArgs.Add("0")
+$RunArgs.Add("-e")
+$RunArgs.Add("QUALITY_CHECK_SCOPE=full")
 foreach ($item in $DockerArgs) { $RunArgs.Add($item) }
 $RunArgs.Add("-v")
 $RunArgs.Add("${TargetPath}:/workspace")
@@ -200,7 +204,7 @@ $RunArgs.Add("/workspace")
 foreach ($item in $ContainerArgs) { $RunArgs.Add($item) }
 
 if ($DebugDocker) {
-  Write-Host ("docker " + ($RunArgs -join " "))
+  Write-Information ("docker " + ($RunArgs -join " ")) -InformationAction Continue
 }
 
 & docker @RunArgs

@@ -113,12 +113,17 @@ def is_probably_text(path: Path) -> bool:
     return b"\0" not in chunk
 
 
-def iter_source_files(root: Path) -> Iterable[Path]:
+def iter_project_files(root: Path) -> Iterable[Path]:
     for path in root.rglob("*"):
         if path.is_dir():
             continue
         if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
             continue
+        yield path
+
+
+def iter_source_files(root: Path) -> Iterable[Path]:
+    for path in iter_project_files(root):
         if is_probably_text(path):
             yield path
 
@@ -177,7 +182,7 @@ def is_iac_file(path: Path, root: Path) -> bool:
     name = path.name
     suffix = path.suffix.lower()
 
-    if name in IAC_FILE_NAMES or suffix in IAC_SUFFIXES:
+    if name in IAC_FILE_NAMES or suffix in IAC_SUFFIXES or name.lower().endswith((".tf.json", ".tfvars.json")):
         return True
     if len(parts) >= 3 and parts[0] == ".github" and parts[1] == "workflows" and suffix in {".yaml", ".yml"}:
         return True

@@ -36,8 +36,18 @@ const SUPPORT_FILES = [
   "docker-compose.yml",
   "docker-compose.yaml",
   ".gitignore",
+  ".quality-gate-policy.json",
   "README.md"
 ];
+const INPUT_FILE_FLAGS = new Set([
+  "--coverage-report",
+  "--dependency-graph",
+  "--evidence-report",
+  "--policy-file",
+  "--test-report"
+]);
+const LARGE_OUTPUT_LIMIT = 64 * 1024 * 1024;
+const OPERATIONAL_EXIT_CODE = 3;
 
 function takeValue(raw, index, flag, options = {}) {
   const value = raw[index + 1];
@@ -64,6 +74,8 @@ function parseArgs(rawArgs, env = process.env) {
     debugDocker: false,
     help: false,
     scope: env.QUALITY_CHECK_SCOPE || "changed",
+    base: env.QUALITY_CHECK_BASE || undefined,
+    head: env.QUALITY_CHECK_HEAD || undefined,
     paths: [],
     excludes: [],
     includes: [],
@@ -96,6 +108,18 @@ function parseArgs(rawArgs, env = process.env) {
 
     if (arg.startsWith("--scope=")) {
       parsed.scope = arg.slice("--scope=".length);
+      continue;
+    }
+
+    if (arg === "--base" || arg === "--head") {
+      parsed[arg.slice(2)] = takeValue(raw, i, arg);
+      i += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--base=") || arg.startsWith("--head=")) {
+      const key = arg.startsWith("--base=") ? "base" : "head";
+      parsed[key] = arg.slice(key.length + 3);
       continue;
     }
 
@@ -271,6 +295,8 @@ function parseArgs(rawArgs, env = process.env) {
     parsed.containerArgs.push("--format", "json");
   }
 
+  Object.defineProperty(parsed, "gitEnv", { value: env, enumerable: false });
+
   return parsed;
 }
 
@@ -295,6 +321,10 @@ function buildDockerArgs(parsed, targetPath, reportsPath = path.join(targetPath,
   return [
     "run",
     "--rm",
+    "--user",
+    "0",
+    "-e",
+    `QUALITY_CHECK_SCOPE=${parsed.scope}`,
     ...parsed.dockerArgs,
     "-v",
     `${targetPath}:/workspace`,
@@ -307,12 +337,23 @@ function buildDockerArgs(parsed, targetPath, reportsPath = path.join(targetPath,
     "/workspace",
     "--output",
     ".quality/reports",
+    "--scope-manifest",
+    ".quality/reports/quality-scope.json",
     ...containerArgs
   ];
 }
 
 function hasSidecarMode(args) {
   return args.some((arg) => arg === "--mode" || String(arg).startsWith("--mode="));
+}
+
+function sidecarMode(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    if (arg === "--mode") return args[index + 1] ? String(args[index + 1]) : null;
+    if (arg.startsWith("--mode=")) return arg.slice("--mode=".length);
+  }
+  return null;
 }
 
 function buildLocalSidecarArgs(parsed, targetPath, reportsPath) {
@@ -324,11 +365,13 @@ function buildLocalSidecarArgs(parsed, targetPath, reportsPath) {
     targetPath,
     "--output",
     reportsPath,
+    "--scope-manifest",
+    path.join(reportsPath, "quality-scope.json"),
     ...containerArgs
   ];
-  if (!hasSidecarMode(containerArgs)) {
-    args.push("--mode", "offline");
-  }
+  // Keep the sidecar's normal contract explicit. Reduced modes remain available,
+  // but only when the caller consciously requests --mode quick|offline.
+  if (!hasSidecarMode(containerArgs)) args.push("--mode", "full");
   return args;
 }
 
@@ -346,6 +389,72 @@ function withoutOutputArgs(args) {
     result.push(arg);
   }
   return result;
+}
+
+function normalizeInputFileArgs(args = [], targetPath) {
+  const normalized = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    if (INPUT_FILE_FLAGS.has(arg)) {
+      normalized.push(arg);
+      if (index + 1 < args.length) {
+        normalized.push(normalizeInputPath(args[++index], targetPath));
+      }
+      continue;
+    }
+    const matched = [...INPUT_FILE_FLAGS].find((flag) => arg.startsWith(`${flag}=`));
+    if (matched) {
+      normalized.push(`${matched}=${normalizeInputPath(arg.slice(matched.length + 1), targetPath)}`);
+      continue;
+    }
+    normalized.push(args[index]);
+  }
+  return normalized;
+}
+
+function normalizeInputPath(value, targetPath) {
+  const absolute = path.resolve(targetPath, String(value));
+  const relative = normalizePath(path.relative(targetPath, absolute));
+  return relative && relative !== ".." && !relative.startsWith("../") ? relative : String(value);
+}
+
+function inputSupportFiles(args = [], targetPath) {
+  const values = [];
+  const policyFiles = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    if (INPUT_FILE_FLAGS.has(arg) && index + 1 < args.length) {
+      const value = String(args[++index]);
+      values.push(value);
+      if (arg === "--policy-file") policyFiles.push(value);
+      continue;
+    }
+    const matched = [...INPUT_FILE_FLAGS].find((flag) => arg.startsWith(`${flag}=`));
+    if (matched) {
+      const value = arg.slice(matched.length + 1);
+      values.push(value);
+      if (matched === "--policy-file") policyFiles.push(value);
+    }
+  }
+  if (!policyFiles.length && fs.existsSync(path.join(targetPath, ".quality-gate-policy.json"))) {
+    policyFiles.push(".quality-gate-policy.json");
+  }
+  for (const policyFile of policyFiles) {
+    const policyPath = path.join(targetPath, normalizeInputPath(policyFile, targetPath));
+    try {
+      const policy = JSON.parse(fs.readFileSync(policyPath, "utf8"));
+      for (const sectionName of ["dependencyGraph", "evidence", "testQuality"]) {
+        const reports = policy?.[sectionName]?.reports;
+        if (Array.isArray(reports)) values.push(...reports.filter((item) => typeof item === "string"));
+      }
+    } catch {
+      // The sidecar reports malformed policy as an operational configuration error.
+    }
+  }
+  return [...new Set(values.map((value) => normalizeInputPath(value, targetPath)).filter((value) => {
+    const absolute = path.join(targetPath, value);
+    return !value.startsWith("../") && fs.existsSync(absolute) && fs.statSync(absolute).isFile();
+  }))];
 }
 
 function quoteForDisplay(value) {
@@ -388,16 +497,28 @@ function resolveScopeFiles(targetPath, parsed) {
   const commands = [];
 
   if (parsed.scope === "changed") {
-    const range = resolveGitRange();
+    const range = resolveGitRange(parsed);
     if (range.base || range.head) {
       const args = ["diff", "--name-only", `${range.base || "HEAD"}...${range.head || "HEAD"}`];
       const result = runCaptured("git", args, targetPath);
       commands.push(recordCommand("git", args, result));
+      assertGitCommandSucceeded(result, args, "resolve the changed-file scope", {
+        scope: parsed.scope,
+        base: range.base || null,
+        head: range.head || null,
+        commands
+      });
       files.push(...splitLines(result.stdout));
     } else {
       for (const args of [["diff", "--name-only"], ["diff", "--cached", "--name-only"], ["ls-files", "--others", "--exclude-standard"]]) {
         const result = runCaptured("git", args, targetPath);
         commands.push(recordCommand("git", args, result));
+        assertGitCommandSucceeded(result, args, "resolve local changed files", {
+          scope: parsed.scope,
+          base: null,
+          head: null,
+          commands
+        });
         files.push(...splitLines(result.stdout));
       }
     }
@@ -423,23 +544,45 @@ function resolveScopeFiles(targetPath, parsed) {
     files.push(...collectIncludedFiles(targetPath, ignorePlan, parsed.paths));
   }
 
-  if (parsed.scope === "full" || (parsed.scope === "changed" && files.length > 0)) {
+  const primaryUnique = [...new Set(files.map(normalizePath).filter(Boolean))];
+  const selectedPaths = primaryUnique.filter((file) => !isIgnored(file, ignorePlan));
+  const selectedFiles = selectedPaths
+    .filter((file) => fs.existsSync(path.join(targetPath, file)) && fs.statSync(path.join(targetPath, file)).isFile());
+  const standardSupport = [];
+  if (parsed.scope === "full" || (parsed.scope === "changed" && selectedFiles.length > 0)) {
     for (const support of SUPPORT_FILES) {
       if (fs.existsSync(path.join(targetPath, support))) {
-        files.push(support);
+        standardSupport.push(support);
       }
     }
+  } else if (parsed.scope === "paths" && fs.existsSync(path.join(targetPath, ".quality-gate-policy.json"))) {
+    standardSupport.push(".quality-gate-policy.json");
   }
-  const unique = [...new Set(files.map(normalizePath).filter(Boolean))];
-  const filtered = unique
+  const explicitSupport = inputSupportFiles(parsed.containerArgs || [], targetPath);
+  const supportFiles = [...new Set([...standardSupport, ...explicitSupport].map(normalizePath))]
     .filter((file) => fs.existsSync(path.join(targetPath, file)) && fs.statSync(path.join(targetPath, file)).isFile())
-    .filter((file) => !isIgnored(file, ignorePlan));
+    .filter((file) => explicitSupport.includes(file) || !isIgnored(file, ignorePlan))
+    .filter((file) => !selectedFiles.includes(file));
+  const filtered = [...new Set([...selectedFiles, ...supportFiles])].sort();
+  const diff = collectDiffMetrics(targetPath, parsed, selectedPaths);
+  const history = collectHistoryMetrics(targetPath, parsed, selectedPaths);
+  const range = resolveGitRange(parsed);
   return {
+    schemaVersion: 1,
     scope: parsed.scope,
-    files: filtered.sort(),
+    base: range.base || null,
+    head: range.head || null,
+    files: filtered,
     fileCount: filtered.length,
-    ignoredCount: unique.length - filtered.length,
+    selectedFiles: selectedPaths.sort(),
+    selectedFileCount: selectedPaths.length,
+    analyzedFileCount: selectedFiles.length,
+    supportFiles: supportFiles.sort(),
+    ignoredCount: primaryUnique.length - selectedPaths.length,
     ignoreFiles: ignorePlan.files,
+    diff,
+    history,
+    resolution: { status: "available" },
     commands
   };
 }
@@ -469,14 +612,269 @@ function collectIncludedFiles(targetPath, ignorePlan, roots) {
   return files;
 }
 
-function resolveGitRange() {
-  if (process.env.GITLAB_CI && process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME) {
-    return { base: `origin/${process.env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME}`, head: process.env.CI_COMMIT_SHA || "HEAD" };
+function validateGitRef(value, flag, scope = "changed") {
+  if (value === undefined || value === null) return undefined;
+  const validType = typeof value === "string" || typeof value === "number";
+  const ref = validType ? String(value) : "";
+  if (!validType || !ref || ref !== ref.trim() || ref.startsWith("-") || /[\x00-\x1f\x7f]/.test(ref)) {
+    const error = new Error(`${flag} must be a non-empty Git revision without control characters and must not start with '-'.`);
+    error.name = "ScopeResolutionError";
+    error.code = "INVALID_GIT_REF";
+    error.exitCode = OPERATIONAL_EXIT_CODE;
+    error.details = { scope, base: null, head: null, commands: [] };
+    throw error;
   }
-  if (process.env.GITHUB_BASE_REF) {
-    return { base: `origin/${process.env.GITHUB_BASE_REF}`, head: process.env.GITHUB_SHA || "HEAD" };
+  return ref;
+}
+
+function resolveGitRange(parsed = {}) {
+  const env = parsed.gitEnv || process.env;
+  if (parsed.base !== undefined || parsed.head !== undefined) {
+    return {
+      base: validateGitRef(parsed.base, "--base", parsed.scope),
+      head: validateGitRef(parsed.head === undefined ? "HEAD" : parsed.head, "--head", parsed.scope)
+    };
+  }
+  if (env.GITLAB_CI && env.CI_MERGE_REQUEST_DIFF_BASE_SHA) {
+    return {
+      base: validateGitRef(env.CI_MERGE_REQUEST_DIFF_BASE_SHA, "CI_MERGE_REQUEST_DIFF_BASE_SHA", parsed.scope),
+      head: validateGitRef(env.CI_COMMIT_SHA || "HEAD", "CI_COMMIT_SHA", parsed.scope)
+    };
+  }
+  if (env.GITLAB_CI && env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME) {
+    return {
+      base: validateGitRef(`origin/${env.CI_MERGE_REQUEST_TARGET_BRANCH_NAME}`, "CI_MERGE_REQUEST_TARGET_BRANCH_NAME", parsed.scope),
+      head: validateGitRef(env.CI_COMMIT_SHA || "HEAD", "CI_COMMIT_SHA", parsed.scope)
+    };
+  }
+  if (env.GITHUB_BASE_REF) {
+    return {
+      base: validateGitRef(`origin/${env.GITHUB_BASE_REF}`, "GITHUB_BASE_REF", parsed.scope),
+      head: validateGitRef(env.GITHUB_SHA || "HEAD", "GITHUB_SHA", parsed.scope)
+    };
   }
   return {};
+}
+
+function runCapturedLarge(command, args, cwd, encoding = "utf8") {
+  return spawnSync(command, args, {
+    cwd,
+    encoding,
+    errors: "replace",
+    timeout: 60000,
+    maxBuffer: LARGE_OUTPUT_LIMIT
+  });
+}
+
+function numstatPath(rawPath, selectedFiles) {
+  const normalized = normalizePath(String(rawPath || "").replace(/^"|"$/g, ""));
+  if (selectedFiles.includes(normalized)) return normalized;
+  return selectedFiles.find((file) => normalized.endsWith(file)) || normalized;
+}
+
+function mergeNumstat(result, selectedFiles, entries) {
+  if (result.status !== 0) return false;
+  for (const line of splitLines(result.stdout)) {
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    const file = numstatPath(parts.slice(2).join("\t"), selectedFiles);
+    if (!selectedFiles.includes(file)) continue;
+    const previous = entries.get(file) || { additions: 0, deletions: 0, binary: false };
+    if (parts[0] === "-" || parts[1] === "-") {
+      previous.binary = true;
+    } else {
+      previous.additions += Number(parts[0]) || 0;
+      previous.deletions += Number(parts[1]) || 0;
+    }
+    entries.set(file, previous);
+  }
+  return true;
+}
+
+function fileLineCount(filePath) {
+  let handle;
+  try {
+    handle = fs.openSync(filePath, "r");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let lines = 0;
+    let total = 0;
+    let lastByte = null;
+    while (true) {
+      const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      if (total < 2048 && chunk.subarray(0, Math.min(bytesRead, 2048 - total)).includes(0)) return null;
+      for (const byte of chunk) if (byte === 10) lines += 1;
+      total += bytesRead;
+      lastByte = chunk[bytesRead - 1];
+    }
+    return total ? lines + (lastByte === 10 ? 0 : 1) : 0;
+  } catch {
+    return null;
+  } finally {
+    if (handle !== undefined) fs.closeSync(handle);
+  }
+}
+
+function patchSize(result) {
+  if (result.status === 0 && Buffer.isBuffer(result.stdout)) return result.stdout.length;
+  if (result.error?.code === "ENOBUFS") return LARGE_OUTPUT_LIMIT + 1;
+  return 0;
+}
+
+function collectDiffMetrics(targetPath, parsed, selectedFiles) {
+  const empty = { status: "not-applicable", fileCount: 0, additions: 0, deletions: 0, changedLines: 0, patchBytes: 0, binaryFiles: 0, files: {} };
+  if (parsed.scope !== "changed") return empty;
+  const entries = new Map();
+  const commands = [];
+  const range = resolveGitRange(parsed);
+  let successful = 0;
+  let attempted = 0;
+  let patchBytes = 0;
+
+  if (range.base || range.head) {
+    const spec = `${range.base || "HEAD"}...${range.head || "HEAD"}`;
+    const args = ["diff", "--numstat", spec, "--", ...selectedFiles];
+    const result = runCapturedLarge("git", args, targetPath);
+    attempted += 1;
+    assertGitCommandSucceeded(result, args, "collect changed-file metrics", {
+      scope: parsed.scope,
+      base: range.base || null,
+      head: range.head || null,
+      commands: [...commands, recordCommand("git", args, result)]
+    });
+    if (mergeNumstat(result, selectedFiles, entries)) successful += 1;
+    commands.push(recordCommand("git", args, result));
+    if (selectedFiles.length > 0) {
+      const patchArgs = ["diff", "--binary", "--no-ext-diff", spec, "--", ...selectedFiles];
+      const patch = runCapturedLarge("git", patchArgs, targetPath, null);
+      assertGitCommandSucceeded(patch, patchArgs, "collect changed-file patch bytes", {
+        scope: parsed.scope,
+        base: range.base || null,
+        head: range.head || null,
+        commands: [...commands, recordCommand("git", patchArgs, patch)]
+      }, { allowBufferLimit: true });
+      commands.push(recordCommand("git", patchArgs, patch));
+      patchBytes += patchSize(patch);
+    }
+  } else {
+    const head = runCaptured("git", ["rev-parse", "--verify", "HEAD"], targetPath);
+    const specs = head.status === 0
+      ? [["diff", "--numstat", "HEAD", "--"]]
+      : [["diff", "--numstat", "--cached", "--"], ["diff", "--numstat", "--"]];
+    const patchSpecs = head.status === 0
+      ? [["diff", "--binary", "--no-ext-diff", "HEAD", "--"]]
+      : [["diff", "--binary", "--no-ext-diff", "--cached", "--"], ["diff", "--binary", "--no-ext-diff", "--"]];
+    for (const args of specs) {
+      const result = runCapturedLarge("git", args, targetPath);
+      attempted += 1;
+      assertGitCommandSucceeded(result, args, "collect local changed-file metrics", {
+        scope: parsed.scope,
+        base: null,
+        head: null,
+        commands: [...commands, recordCommand("git", args, result)]
+      });
+      if (mergeNumstat(result, selectedFiles, entries)) successful += 1;
+      commands.push(recordCommand("git", args, result));
+    }
+    if (selectedFiles.length > 0) {
+      for (const baseArgs of patchSpecs) {
+        const args = [...baseArgs, ...selectedFiles];
+        const patch = runCapturedLarge("git", args, targetPath, null);
+        assertGitCommandSucceeded(patch, args, "collect local changed-file patch bytes", {
+          scope: parsed.scope,
+          base: null,
+          head: null,
+          commands: [...commands, recordCommand("git", args, patch)]
+        }, { allowBufferLimit: true });
+        commands.push(recordCommand("git", args, patch));
+        patchBytes += patchSize(patch);
+      }
+    }
+  }
+
+  const untracked = runCaptured("git", ["ls-files", "--others", "--exclude-standard"], targetPath);
+  assertGitCommandSucceeded(untracked, ["ls-files", "--others", "--exclude-standard"], "collect untracked changed files", {
+    scope: parsed.scope,
+    base: range.base || null,
+    head: range.head || null,
+    commands: [...commands, recordCommand("git", ["ls-files", "--others", "--exclude-standard"], untracked)]
+  });
+  commands.push(recordCommand("git", ["ls-files", "--others", "--exclude-standard"], untracked));
+  if (untracked.status === 0) {
+    for (const file of splitLines(untracked.stdout).map(normalizePath).filter((item) => selectedFiles.includes(item))) {
+      if (entries.has(file)) continue;
+      const absolute = path.join(targetPath, file);
+      const lines = fileLineCount(absolute);
+      const size = fs.existsSync(absolute) ? fs.statSync(absolute).size : 0;
+      entries.set(file, { additions: lines || 0, deletions: 0, binary: lines === null });
+      patchBytes += size;
+    }
+  }
+
+  let additions = 0;
+  let deletions = 0;
+  let binaryFiles = 0;
+  const files = {};
+  for (const [file, entry] of entries) {
+    additions += entry.additions;
+    deletions += entry.deletions;
+    if (entry.binary) binaryFiles += 1;
+    files[file] = entry;
+  }
+  return {
+    status: successful === attempted ? "available" : successful ? "partial" : "unavailable",
+    base: range.base || null,
+    head: range.head || null,
+    fileCount: selectedFiles.length,
+    additions,
+    deletions,
+    changedLines: additions + deletions,
+    patchBytes,
+    binaryFiles,
+    files,
+    commands
+  };
+}
+
+function collectHistoryMetrics(targetPath, parsed, selectedFiles) {
+  if (parsed.scope !== "changed") return { status: "not-applicable", commitLimit: 500, files: {} };
+  const fileLimit = 500;
+  const historyFiles = [...selectedFiles].sort().slice(0, fileLimit);
+  const truncated = selectedFiles.length > historyFiles.length;
+  const selected = new Set(historyFiles);
+  const collected = new Map(historyFiles.map((file) => [file, { commits: new Set(), additions: 0, deletions: 0 }]));
+  let successful = 0;
+  let attempted = 0;
+  for (let offset = 0; offset < historyFiles.length; offset += 50) {
+    const batch = historyFiles.slice(offset, offset + 50);
+    const args = ["log", "--max-count=500", "--format=commit:%H", "--numstat", "--no-renames", "--", ...batch];
+    const result = runCapturedLarge("git", args, targetPath);
+    attempted += 1;
+    if (result.status !== 0) continue;
+    successful += 1;
+    let commit = null;
+    for (const line of String(result.stdout || "").split(/\r?\n/)) {
+      if (line.startsWith("commit:")) {
+        commit = line.slice("commit:".length).trim();
+        continue;
+      }
+      const parts = line.split("\t");
+      if (parts.length < 3 || parts[0] === "-" || parts[1] === "-") continue;
+      const file = numstatPath(parts.slice(2).join("\t"), historyFiles);
+      if (!selected.has(file)) continue;
+      const item = collected.get(file);
+      if (commit) item.commits.add(commit);
+      item.additions += Number(parts[0]) || 0;
+      item.deletions += Number(parts[1]) || 0;
+    }
+  }
+  const files = {};
+  for (const [file, item] of collected) {
+    files[file] = { commits: item.commits.size, additions: item.additions, deletions: item.deletions, churn: item.additions + item.deletions };
+  }
+  const status = !attempted ? "unavailable" : successful === attempted && !truncated ? "available" : successful ? "partial" : "unavailable";
+  return { status, commitLimit: 500, fileLimit, truncatedFiles: selectedFiles.length - historyFiles.length, files };
 }
 
 function loadIgnorePlan(targetPath, parsed) {
@@ -534,7 +932,30 @@ function runCaptured(command, args, cwd) {
 }
 
 function recordCommand(command, args, result) {
-  return { command: commandLine(command, args), exitCode: result.status ?? null };
+  return {
+    command: commandLine(command, args),
+    exitCode: result.status ?? null,
+    stderr: String(result.stderr || result.error?.message || "").trim().slice(0, 4000)
+  };
+}
+
+function assertGitCommandSucceeded(result, args, purpose, context = {}, options = {}) {
+  if (!result.error && result.status === 0) return;
+  if (options.allowBufferLimit && result.error?.code === "ENOBUFS") return;
+  const command = commandLine("git", args);
+  const exitCode = result.status ?? null;
+  const stderr = String(result.stderr || result.error?.message || "Git command failed").trim().slice(0, 4000);
+  const error = new Error(`Unable to ${purpose}: ${command} exited with ${exitCode ?? "no status"}. ${stderr}`.trim());
+  error.name = "ScopeResolutionError";
+  error.code = "GIT_SCOPE_RESOLUTION_FAILED";
+  error.exitCode = OPERATIONAL_EXIT_CODE;
+  error.details = {
+    ...context,
+    command,
+    commandExitCode: exitCode,
+    stderr
+  };
+  throw error;
 }
 
 function splitLines(text) {
@@ -582,32 +1003,37 @@ function matchesPattern(file, pattern) {
     return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`) || normalizedFile.includes(`/${prefix}/`);
   }
   if (!normalizedPattern.includes("/")) {
-    return normalizedFile.split("/").some((part) => globRegex(normalizedPattern).test(part));
+    return normalizedFile.split("/").some((part) => globMatches(part, normalizedPattern));
   }
-  return globRegex(normalizedPattern).test(normalizedFile);
+  return globMatches(normalizedFile, normalizedPattern);
 }
 
-function globRegex(pattern) {
-  let out = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index];
-    const next = pattern[index + 1];
-    if (char === "*" && next === "*") {
-      out += ".*";
-      index += 1;
-    } else if (char === "*") {
-      out += "[^/]*";
-    } else if (char === "?") {
-      out += "[^/]";
-    } else {
-      out += escapeRegex(char);
+function globMatches(value, pattern) {
+  const memo = new Map();
+  const match = (valueIndex, patternIndex) => {
+    const key = `${valueIndex}:${patternIndex}`;
+    if (memo.has(key)) {
+      return memo.get(key);
     }
-  }
-  return new RegExp(`${out}$`);
-}
-
-function escapeRegex(value) {
-  return value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
+    let matched;
+    if (patternIndex === pattern.length) {
+      matched = valueIndex === value.length;
+    } else if (pattern[patternIndex] === "*" && pattern[patternIndex + 1] === "*") {
+      matched = match(valueIndex, patternIndex + 2) ||
+        (valueIndex < value.length && match(valueIndex + 1, patternIndex));
+    } else if (pattern[patternIndex] === "*") {
+      matched = match(valueIndex, patternIndex + 1) ||
+        (valueIndex < value.length && value[valueIndex] !== "/" && match(valueIndex + 1, patternIndex));
+    } else if (pattern[patternIndex] === "?") {
+      matched = valueIndex < value.length && value[valueIndex] !== "/" && match(valueIndex + 1, patternIndex + 1);
+    } else {
+      matched = valueIndex < value.length && value[valueIndex] === pattern[patternIndex] &&
+        match(valueIndex + 1, patternIndex + 1);
+    }
+    memo.set(key, matched);
+    return matched;
+  };
+  return match(0, 0);
 }
 
 function isDockerAvailable(env = process.env, runner = spawnSync) {
@@ -780,13 +1206,22 @@ function localSidecarEnv(env = process.env, packageRoot = PACKAGE_ROOT) {
 function runLocalSidecar(parsed, scopedTarget, reportsPath, env = process.env, runner = spawnSync) {
   const args = buildLocalSidecarArgs(parsed, scopedTarget.effectiveTarget, reportsPath);
   const command = pythonCommand(env);
+  const mode = sidecarMode(args) || "full";
   if (parsed.debugDocker) {
     console.log(commandLine(command, args));
   }
-  console.error("Docker is not available; running bundled Quality Gate sidecar locally in offline mode.");
+  console.error(
+    `Docker is not available; running the bundled Quality Gate sidecar locally in ${mode} mode. ` +
+    (mode === "full"
+      ? "Unavailable required tools will fail the gate."
+      : "This reduced mode was explicitly requested by the caller.")
+  );
   const result = runner(command, args, {
     stdio: "inherit",
-    env: localSidecarEnv(env)
+    env: {
+      ...localSidecarEnv(env),
+      QUALITY_CHECK_SCOPE: parsed.scope
+    }
   });
   if (result.error) {
     console.error(`Failed to run local quality sidecar: ${result.error.message}`);
@@ -807,6 +1242,7 @@ Usage:
 
 Scope flags:
   --scope changed|full|paths     changed is the default.
+  --base <ref> / --head <ref>    Explicit Git range; GitLab merge request variables are auto-detected.
   --path <path>                  Add a path for scope=paths; repeatable.
   --exclude <glob>               Exclude files using gitignore-style globs; repeatable.
   --include <glob>               Re-include a previously excluded file; repeatable.
@@ -827,8 +1263,19 @@ Docker wrapper flags:
   --debug-docker
 
 Local fallback:
-  When Docker is not available, the bundled Python sidecar runs locally in offline mode.
-  Pass --mode quick|offline|full to choose the sidecar mode explicitly.
+  When Docker is not available, the bundled Python sidecar keeps full mode by default.
+  Pass --mode quick|offline explicitly to opt into a reduced-evidence scan.
+
+Language-agnostic policy:
+  --policy-file <path>           Budgets, change requirements, and evidence thresholds.
+  --max-file-bytes <n>           Override a profile budget; 0 disables that budget.
+  --max-file-lines <n>
+  --max-changed-files <n>
+  --max-changed-lines <n>
+  --max-diff-bytes <n>
+  --dependency-graph <path>      Normalized dependency graph JSON; repeatable.
+  --evidence-report <path>       Normalized quality evidence JSON; repeatable.
+  --test-report <path>           JUnit XML evidence; repeatable.
 
 All remaining flags are passed to the sidecar check command.
 `;
@@ -853,6 +1300,12 @@ function writeEmptyQualityReport(reportsPath, scope, parsed) {
       toolErrors: []
     },
     stack: {},
+    metrics: {
+      scope: scope.scope,
+      totals: { files: 0, bytes: 0, textFiles: 0, binaryFiles: 0, lines: 0 },
+      change: scope.diff || { status: "unavailable", files: 0, additions: 0, deletions: 0, changedLines: 0, patchBytes: 0, binaryFiles: 0 },
+      notEvaluated: "No files matched the requested scope after ignore rules."
+    },
     tools: [],
     findings: []
   };
@@ -864,11 +1317,90 @@ function writeEmptyQualityReport(reportsPath, scope, parsed) {
   );
 }
 
+function failedScopeManifest(parsed, error) {
+  const range = resolveGitRange(parsed);
+  const details = error.details || {};
+  return {
+    schemaVersion: 1,
+    scope: parsed.scope,
+    base: details.base ?? range.base ?? null,
+    head: details.head ?? range.head ?? null,
+    files: [],
+    fileCount: 0,
+    selectedFiles: [],
+    selectedFileCount: 0,
+    analyzedFileCount: 0,
+    supportFiles: [],
+    ignoredCount: 0,
+    ignoreFiles: [],
+    diff: {
+      status: "error",
+      base: details.base ?? range.base ?? null,
+      head: details.head ?? range.head ?? null,
+      fileCount: 0,
+      additions: 0,
+      deletions: 0,
+      changedLines: 0,
+      patchBytes: 0,
+      binaryFiles: 0,
+      files: {}
+    },
+    history: { status: "not-evaluated", files: {} },
+    resolution: {
+      status: "error",
+      code: error.code || "SCOPE_RESOLUTION_FAILED",
+      message: error.message,
+      exitCode: error.exitCode || OPERATIONAL_EXIT_CODE
+    },
+    commands: Array.isArray(details.commands) ? details.commands : []
+  };
+}
+
+function writeOperationalQualityReport(reportsPath, scope, parsed, error) {
+  fs.mkdirSync(reportsPath, { recursive: true });
+  const code = error.code || "SCOPE_RESOLUTION_FAILED";
+  const exitCode = error.exitCode || OPERATIONAL_EXIT_CODE;
+  const message = error.message || "The requested scope could not be resolved.";
+  const report = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    target: parsed.target,
+    status: "ERROR",
+    exitCode,
+    profile: "standard",
+    mode: "scoped",
+    score: { value: null, threshold: null, max: 100 },
+    scope,
+    scoreAppliesTo: scoreAppliesToForScope(scope.scope),
+    summary: {
+      counts: { active: 0, allowed: 0, total: 0 },
+      reasons: [message],
+      toolErrors: ["git"]
+    },
+    error: { code, message, exitCode },
+    stack: {},
+    metrics: {
+      scope: scope.scope,
+      totals: { files: 0, bytes: 0, textFiles: 0, binaryFiles: 0, lines: 0 },
+      change: scope.diff,
+      notEvaluated: "Scope resolution failed; no quality decision was made."
+    },
+    tools: [],
+    findings: []
+  };
+  fs.writeFileSync(path.join(reportsPath, "quality-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(reportsPath, "quality-report.md"),
+    `# Quality Gate Report\n\nStatus: ERROR\nExit code: ${exitCode}\nScope: ${scope.scope}\nError: ${code}\n\n${message}\n`,
+    "utf8"
+  );
+}
+
 function scoreAppliesToForScope(scope) {
   return scope === "full" ? "entire-project" : scope === "paths" ? "selected-paths" : "changed-files";
 }
 
-function augmentQualityReports(reportsPath, scope, parsed) {
+function augmentQualityReports(reportsPath, scope) {
   const jsonPath = path.join(reportsPath, "quality-report.json");
   const markdownPath = path.join(reportsPath, "quality-report.md");
   if (fs.existsSync(jsonPath)) {
@@ -907,12 +1439,28 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
       return 0;
     }
     targetPath = ensureTarget(parsed.target);
+    parsed.containerArgs = normalizeInputFileArgs(parsed.containerArgs, targetPath);
   } catch (error) {
     console.error(error.message);
     return 3;
   }
 
-  const scopedTarget = resolveScopedTarget(targetPath, parsed);
+  let scopedTarget;
+  try {
+    scopedTarget = resolveScopedTarget(targetPath, parsed);
+  } catch (error) {
+    if (!error.code) error.code = "SCOPE_RESOLUTION_FAILED";
+    if (!error.exitCode) error.exitCode = OPERATIONAL_EXIT_CODE;
+    const reportsPath = path.isAbsolute(parsed.output)
+      ? parsed.output
+      : path.resolve(targetPath, parsed.output);
+    const scope = failedScopeManifest(parsed, error);
+    fs.mkdirSync(reportsPath, { recursive: true });
+    fs.writeFileSync(path.join(reportsPath, "quality-scope.json"), `${JSON.stringify(scope, null, 2)}\n`, "utf8");
+    writeOperationalQualityReport(reportsPath, scope, parsed, error);
+    console.error(`${error.code}: ${error.message}`);
+    return error.exitCode;
+  }
   const reportsPath = scopedTarget.reportsPath;
   fs.mkdirSync(reportsPath, { recursive: true });
   fs.writeFileSync(
@@ -921,7 +1469,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
     "utf8"
   );
 
-  if (scopedTarget.scope.files.length === 0) {
+  if (scopedTarget.scope.files.length === 0 && scopedTarget.scope.selectedFileCount === 0) {
     writeEmptyQualityReport(reportsPath, scopedTarget.scope, parsed);
     console.error("No files matched the requested quality-check scope after ignore rules.");
     return 0;
@@ -929,7 +1477,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
 
   if (!ensureDockerAvailable(parsed, env, runner, starter)) {
     const exitCode = runLocalSidecar(parsed, scopedTarget, reportsPath, env, runner);
-    augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
+    augmentQualityReports(reportsPath, scopedTarget.scope);
     return exitCode;
   }
 
@@ -962,7 +1510,7 @@ function runDockerWrapper(rawArgs, env = process.env, runner = spawnSync, starte
     return 3;
   }
 
-  augmentQualityReports(reportsPath, scopedTarget.scope, parsed);
+  augmentQualityReports(reportsPath, scopedTarget.scope);
   return result.status ?? 3;
 }
 
@@ -987,14 +1535,20 @@ module.exports = {
   canBuildBundledImage,
   buildBundledImage,
   buildLocalSidecarArgs,
+  sidecarMode,
   runLocalSidecar,
   helpText,
   resolveScopeFiles,
   resolveScopedTarget,
+  resolveGitRange,
+  collectDiffMetrics,
+  collectHistoryMetrics,
+  normalizeInputFileArgs,
+  inputSupportFiles,
   matchesPattern,
   augmentQualityReports,
   writeEmptyQualityReport,
+  writeOperationalQualityReport,
   normalizeFormatValue,
   runDockerWrapper
 };
-

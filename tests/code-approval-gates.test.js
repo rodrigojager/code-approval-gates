@@ -15,6 +15,7 @@ const {
   buildEquivalentCommand,
   buildBaselineSourceScanArgs,
   buildElevatedDoctorCommand,
+  exitCodeForSummary,
   readObjective,
   normalizedOptions,
   helpFor,
@@ -113,6 +114,14 @@ test("detectExecutionMode makes json and ci headless", () => {
   assert.equal(detectExecutionMode({ json: true, interactive: true }).interactive, false);
   assert.equal(detectExecutionMode({ ci: true, interactive: true }).interactive, false);
   assert.equal(detectExecutionMode({ noInteractive: true, interactive: true }).interactive, false);
+});
+
+test("operational errors keep a distinct non-zero exit even in non-blocking mode", () => {
+  assert.equal(exitCodeForSummary({ status: "APPROVED", errors: [], gates: [] }, {}), 0);
+  assert.equal(exitCodeForSummary({ status: "NEEDS_CHANGES", errors: [], gates: [{ exitCode: 1 }] }, {}), 1);
+  assert.equal(exitCodeForSummary({ status: "NEEDS_CHANGES", errors: [], gates: [{ exitCode: 1 }] }, { nonBlocking: true }), 0);
+  assert.equal(exitCodeForSummary({ status: "ERROR", errors: [{ exitCode: 3 }], gates: [] }, { nonBlocking: true }), 3);
+  assert.equal(exitCodeForSummary({ status: "ERROR", errors: [], gates: [{ exitCode: 5 }] }, {}), 5);
 });
 
 test("root json headless without command returns structured error", async () => {
@@ -545,6 +554,8 @@ test("help text lists all public commands and baseline scope flags", () => {
 
   assert.match(qualityHelp, /code-approval-gates quality --scope changed --json --no-interactive/);
   assert.match(qualityHelp, /code-approval-gates quality --ci --scope changed[^\n]*--no-interactive/);
+  assert.match(qualityHelp, /--max-changed-lines/);
+  assert.match(qualityHelp, /--dependency-graph/);
 
   const semanticHelp = helpFor("semantic");
 
@@ -702,6 +713,17 @@ test("package metadata and README point users to the unified CLI", () => {
   assert.equal(pkg.scripts["test:semantic"], "npm --prefix semantic-gate test --workspaces=false");
   assert.equal(pkg.scripts["test:semantic:build"], "npm --prefix semantic-gate run test:build --workspaces=false");
   assert.match(verifyScript, /npm run test:build --workspaces=false/);
+  assert.match(verifyScript, /python -m pip install[^\n]*defusedxml==0\.7\.1/);
+  assert.ok(
+    verifyScript.indexOf("defusedxml==0.7.1") <
+      verifyScript.indexOf("Invoke-Native npm run test:root"),
+    "Python sidecar dependencies must be installed before root end-to-end tests"
+  );
+  assert.ok(
+    verifyScript.indexOf("Invoke-Native npm run build --workspaces=false") <
+      verifyScript.indexOf("Invoke-Native npm run test:root"),
+    "semantic dependencies and dist must be bootstrapped before root doctor tests"
+  );
   assert.equal(exampleConfig.output, ".quality/reports/latest");
   assert.deepEqual(exampleConfig.paths, []);
   assert.deepEqual(exampleConfig.excludes, []);
@@ -1072,6 +1094,92 @@ test("run changed scope with no matching files returns approved summary with emp
     assert.deepEqual(summary.gates.map((gate) => gate.name), ["semantic", "quality"]);
     assert.deepEqual(summary.gates.map((gate) => gate.score), [100, 100]);
     assert.deepEqual(summary.gates.map((gate) => gate.skipped), [true, true]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("run changed scope fails closed when an explicit Git range is invalid", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "code-approval-invalid-range-"));
+  try {
+    run("git", ["init"], temp);
+    fs.writeFileSync(path.join(temp, "app.js"), "const ready = true;\n", "utf8");
+    run("git", ["add", "."], temp);
+    run("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial"], temp);
+
+    const result = spawnSync(process.execPath, [
+      CLI,
+      "quality",
+      "--scope", "changed",
+      "--base", "missing-base-ref",
+      "--head", "HEAD",
+      "--json",
+      "--no-interactive",
+      "--output", ".quality/reports/invalid-range"
+    ], { cwd: temp, encoding: "utf8" });
+
+    assert.equal(result.status, 3, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, "ERROR");
+    assert.equal(summary.finalScore, null);
+    assert.equal(summary.gates.length, 0);
+    assert.equal(summary.scopeResolution.resolution.status, "error");
+    assert.equal(summary.scopeResolution.resolution.code, "GIT_SCOPE_RESOLUTION_FAILED");
+    assert.equal(summary.errors[0].code, "GIT_SCOPE_RESOLUTION_FAILED");
+    assert.equal(summary.errors[0].exitCode, 3);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("run rejects Git ref option injection before invoking Git", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "code-approval-ref-injection-"));
+  try {
+    const output = path.join(temp, "reports");
+    const result = spawnSync(process.execPath, [
+      CLI,
+      "quality",
+      "--scope", "changed",
+      "--base",
+      `--output=${output}`,
+      "--json",
+      "--no-interactive"
+    ], { cwd: temp, encoding: "utf8" });
+
+    assert.equal(result.status, 3, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, "ERROR");
+    assert.equal(summary.errors[0].code, "INVALID_GIT_REF");
+    assert.equal(summary.errors[0].exitCode, 3);
+    assert.deepEqual(summary.errors[0].details.commands, []);
+    assert.deepEqual(summary.scopeResolution.commands, []);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("run changed scope fails closed outside a Git repository", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "code-approval-non-git-"));
+  try {
+    fs.writeFileSync(path.join(temp, "app.js"), "const ready = true;\n", "utf8");
+    const result = spawnSync(process.execPath, [
+      CLI,
+      "quality",
+      "--scope", "changed",
+      "--json",
+      "--no-interactive",
+      "--output", ".quality/reports/non-git"
+    ], {
+      cwd: temp,
+      encoding: "utf8",
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(temp) }
+    });
+
+    assert.equal(result.status, 3, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, "ERROR");
+    assert.equal(summary.scopeResolution.resolution.status, "error");
+    assert.equal(summary.errors[0].code, "GIT_SCOPE_RESOLUTION_FAILED");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

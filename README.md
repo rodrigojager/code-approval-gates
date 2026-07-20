@@ -140,7 +140,23 @@ code-approval-gates quality --scope changed
 code-approval-gates run --gate quality --scope changed
 ```
 
-Quando Docker nao esta instalado, iniciado ou acessivel, o Quality Gate tenta iniciar o Docker automaticamente e espera o daemon ficar pronto. Se o Docker nao subir dentro do limite, ele usa o sidecar Python empacotado em modo `offline`. Use `--no-start-docker` para pular a tentativa de inicializacao, `--docker-start-timeout-ms <ms>` para ajustar a espera, e `--mode quick`, `--mode offline` ou `--mode full` para escolher o modo do sidecar; `full` continua dependendo das ferramentas externas disponiveis no ambiente.
+O modo padrao e `full` e falha de forma explicita quando as ferramentas obrigatorias nao estao disponiveis; ele nao converte indisponibilidade em aprovacao `offline`. Use `--mode quick` ou `--mode offline` somente como escolha explicita para diagnostico/local, e `--mode full` para enforcement. As opcoes `--no-start-docker` e `--docker-start-timeout-ms <ms>` controlam apenas a tentativa de inicializar/aguardar Docker, sem downgrade silencioso de modo.
+
+O Quality Gate tambem aplica budgets independentes de linguagem em todos os modos: bytes/linhas por arquivo, quantidade e tamanho das alteracoes, bytes do diff, binarios alterados e hotspots do historico Git. Os perfis usam limites conservadores e cada valor pode ser sobrescrito; `0` desativa apenas aquele budget:
+
+```powershell
+code-approval-gates quality --scope changed --profile strict --max-file-lines 1500 --max-changed-files 40
+```
+
+Regras mais especificas ficam em `.quality-gate-policy.json`: budgets, obrigacao de arquivos acompanhantes, limites de grafo e thresholds de evidencias. Ciclos, fan-in/fan-out e camadas usam um grafo JSON normalizado. JUnit XML fornece evidencia de testes. Mutacao, complexidade, tamanho de modelos e breaking changes usam um JSON neutro produzido pelo analisador de qualquer linguagem e validado pelo mesmo gate:
+
+```powershell
+code-approval-gates quality --dependency-graph .quality/evidence/dependency-graph.json
+code-approval-gates quality --evidence-report .quality/evidence/quality-evidence.json
+code-approval-gates quality --test-report .quality/evidence/junit.xml --min-tests 10
+```
+
+Veja `quality-gate/examples/quality-gate-policy.example.json` e `quality-gate/README.md`. Evidencia solicitada, mas ausente/invalida, retorna `NEEDS_CHANGES`/exit `2`; violacao deterministica retorna `REJECTED`/exit `1`.
 
 Rodar somente o Semantic Gate:
 
@@ -333,47 +349,25 @@ code-approval-gates report summary
 
 ### GitLab CI
 
-Em pipelines consumidores, rode `code-approval-gates`. Reserve `npm run verify` para validar este repositorio antes de release/publicacao.
+Em pipelines consumidores, rode `code-approval-gates` para o fluxo unificado local/host. O container corporativo GitLab é uma fronteira separada e usa apenas o launcher fixo da imagem.
 
-Merge request, analisando apenas alteracoes:
+Para o Quality Gate corporativo, use a imagem standalone por digest e o comando container-native `quality-ci`. O pacote `code-approval-gates` não está publicado no npm; portanto, não use `npm install -g code-approval-gates` em pipelines consumidoras.
 
-```yaml
-code_approval_gates:
-  image: node:22
-  stage: test
-  variables:
-    GIT_DEPTH: "0"
-  before_script:
-    - npm install -g code-approval-gates
-  script:
-    - code-approval-gates doctor --ci --no-interactive
-    - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
-  artifacts:
-    when: always
-    paths:
-      - code-approval-report/
-    expire_in: 14 days
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+Configure imagem, policy externa ao checkout, SHA-256 da policy, target branch e runner tag em configuração central do GitLab e copie/inclua `examples/ci/gitlab-quality-gate.yml` por Pipeline Execution Policy/compliance CI antes de tornar o gate bloqueante. A imagem final deve ter este formato:
+
+```text
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<digest-dotnetweb-publicado>
 ```
 
-Scan completo agendado:
+O template chama somente `/usr/local/bin/quality-ci check`, roda changed scope contra `origin/<target-branch>` sem confiar no diff-base do job, materializa a árvore do commit sem `.git`, não executa testes do MR e publica somente JSON, Markdown e scope manifest. Ele permanece advisory até o hardening dos scanners e enforcement central. O overlay `examples/ci/gitlab-quality-and-sonarqube.yml` exige o job Sonar hardened da empresa. O tutorial completo está em `docs/plano-gitlab-quality-gate.md`.
 
-```yaml
-code_approval_full_scan:
-  image: node:22
-  stage: test
-  before_script:
-    - npm install -g code-approval-gates
-  script:
-    - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
-  artifacts:
-    when: always
-    paths:
-      - code-approval-report/
-    expire_in: 30 days
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+Para instalar a CLI local a partir de um clone, use o repositório e não o registry npm:
+
+```powershell
+git clone https://github.com/rodrigojager/code-approval-gates.git
+Set-Location code-approval-gates
+npm install
+npm install -g .
 ```
 
 ### Binarios diretos avancados
@@ -554,7 +548,23 @@ code-approval-gates quality --scope changed
 code-approval-gates run --gate quality --scope changed
 ```
 
-When Docker is not installed, running, or accessible, the Quality Gate tries to start Docker automatically and waits for the daemon to become ready. If Docker does not come up within the timeout, it uses the bundled Python sidecar in `offline` mode. Use `--no-start-docker` to skip startup, `--docker-start-timeout-ms <ms>` to tune the wait, and `--mode quick`, `--mode offline`, or `--mode full` to choose the sidecar mode; `full` still depends on external tools available in the environment.
+The default is `full` and it fails explicitly when mandatory tools are unavailable; it does not turn an unavailable full scan into an offline approval. Select `--mode quick` or `--mode offline` explicitly for local/diagnostic use, and `--mode full` for enforcement. `--no-start-docker` and `--docker-start-timeout-ms <ms>` only control Docker startup/wait behavior and never cause a silent mode downgrade.
+
+Quality Gate also applies language-independent budgets in every mode: bytes/lines per file, change count and size, diff bytes, changed binaries, and Git-history hotspots. Profiles use conservative limits and every value can be overridden; `0` disables only that budget:
+
+```powershell
+code-approval-gates quality --scope changed --profile strict --max-file-lines 1500 --max-changed-files 40
+```
+
+More specific rules live in `.quality-gate-policy.json`: budgets, companion-file requirements, graph limits, and evidence thresholds. Cycles, fan-in/fan-out, and layers use normalized graph JSON. JUnit XML provides test evidence. Mutation, complexity, model size, and breaking changes use neutral JSON emitted by an analyzer for any language and validated by the same gate:
+
+```powershell
+code-approval-gates quality --dependency-graph .quality/evidence/dependency-graph.json
+code-approval-gates quality --evidence-report .quality/evidence/quality-evidence.json
+code-approval-gates quality --test-report .quality/evidence/junit.xml --min-tests 10
+```
+
+See `quality-gate/examples/quality-gate-policy.example.json` and `quality-gate/README.md`. Requested but missing/invalid evidence returns `NEEDS_CHANGES`/exit `2`; a deterministic violation returns `REJECTED`/exit `1`.
 
 Run only Semantic Gate:
 
@@ -747,47 +757,25 @@ code-approval-gates report summary
 
 ### GitLab CI
 
-In consumer pipelines, run `code-approval-gates`. Reserve `npm run verify` for validating this repository before release/publishing.
+In consumer pipelines, run `code-approval-gates` for the unified local/host workflow. The corporate GitLab container is a separate boundary and uses only the image's fixed launcher.
 
-Merge request, analyzing changed files only:
+For the corporate Quality Gate, use the standalone image by digest and the container-native `quality-ci` command. The `code-approval-gates` package is not published to npm, so consumer pipelines must not run `npm install -g code-approval-gates`.
 
-```yaml
-code_approval_gates:
-  image: node:22
-  stage: test
-  variables:
-    GIT_DEPTH: "0"
-  before_script:
-    - npm install -g code-approval-gates
-  script:
-    - code-approval-gates doctor --ci --no-interactive
-    - code-approval-gates run --ci --scope changed --format json,md --output code-approval-report --no-interactive
-  artifacts:
-    when: always
-    paths:
-      - code-approval-report/
-    expire_in: 14 days
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+Configure the image, policy outside the checkout, policy SHA-256, target branch, and runner tag in central GitLab configuration, then enforce `examples/ci/gitlab-quality-gate.yml` through Pipeline Execution Policy/compliance CI before blocking. The final image reference has this shape:
+
+```text
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-dotnetweb-digest>
 ```
 
-Scheduled full scan:
+The template calls only `/usr/local/bin/quality-ci check`, resolves changed scope from `origin/<target-branch>` rather than a job-provided diff base, materializes the commit tree without `.git`, never executes MR tests, and uploads only JSON, Markdown, and the scope manifest. It remains advisory until scanner hardening and central enforcement are complete. The `examples/ci/gitlab-quality-and-sonarqube.yml` overlay requires the company's hardened Sonar job. See `docs/gitlab-quality-gate.en.md`.
 
-```yaml
-code_approval_full_scan:
-  image: node:22
-  stage: test
-  before_script:
-    - npm install -g code-approval-gates
-  script:
-    - code-approval-gates run --ci --scope full --format json,md --output code-approval-report --no-interactive
-  artifacts:
-    when: always
-    paths:
-      - code-approval-report/
-    expire_in: 30 days
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+For local CLI installation from a clone, use the repository rather than the npm registry:
+
+```powershell
+git clone https://github.com/rodrigojager/code-approval-gates.git
+Set-Location code-approval-gates
+npm install
+npm install -g .
 ```
 
 ### Advanced direct binaries
@@ -846,5 +834,3 @@ semantic-gate run --scope full --objective-file .quality/objective.md --json
 ```
 
 Prefer `code-approval-gates` for new workflows.
-
-

@@ -5,7 +5,17 @@ import sys
 from pathlib import Path
 
 from .detectors import detect_builtin_findings, detect_stack
+from .evidence import analyze_dependency_graphs, analyze_evidence_reports, analyze_test_reports
+from .i18n import normalize_locale, translate
+from .metrics import (
+    BUDGET_KEYS,
+    analyze_change_requirements,
+    analyze_quality_budgets,
+    load_quality_policy,
+    load_scope_manifest,
+)
 from .policy import apply_allowances, evaluate_policy
+from .provenance import sha256_file
 from .report import build_report, write_json_report, write_markdown_report
 from .tools import run_coverage_check, run_external_tools
 from .waivers import load_waivers
@@ -19,10 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("target", nargs="?", default="/workspace")
     check.add_argument("--threshold", type=int, default=None)
     check.add_argument("--profile", choices=["relaxed", "standard", "strict"], default="standard")
+    check.add_argument("--locale", default=None, help="Human-readable output locale (en or pt-BR).")
     check.add_argument("--enable-pii", action="store_true")
     check.add_argument("--enable-secrets", action="store_true")
     check.add_argument("--disable-iac", action="store_true", help="Disable default Checkov IaC scanning.")
     check.add_argument("--no-iac", action="store_true", help=argparse.SUPPRESS)
+    check.add_argument(
+        "--run-project-tests",
+        action="store_true",
+        help="Explicitly execute project-owned npm/Python tests. Disabled by default in CI for isolation.",
+    )
     check.add_argument("--enable-coverage", action="store_true")
     check.add_argument("--coverage-report", action="append", default=[])
     check.add_argument("--min-line-coverage", type=float, default=80.0)
@@ -38,6 +54,33 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--output", default=".quality/reports")
     check.add_argument("--fail-on-tool-error", action="store_true")
     check.add_argument("--mode", choices=["full", "quick", "offline"], default="full")
+    check.add_argument("--policy-file", default=None)
+    check.add_argument("--require-policy", action="store_true", help="Fail if no explicit or conventional policy file exists.")
+    check.add_argument("--policy-sha256", default=None, help="Require the policy file to match this SHA-256 digest.")
+    check.add_argument("--scope-manifest", default=None, help=argparse.SUPPRESS)
+    check.add_argument("--disable-budgets", action="store_true")
+    check.add_argument("--max-file-bytes", type=int, default=None)
+    check.add_argument("--max-file-lines", type=int, default=None)
+    check.add_argument("--max-scope-bytes", type=int, default=None)
+    check.add_argument("--max-scope-lines", type=int, default=None)
+    check.add_argument("--max-changed-files", type=int, default=None)
+    check.add_argument("--max-changed-lines", type=int, default=None)
+    check.add_argument("--max-diff-bytes", type=int, default=None)
+    check.add_argument("--max-binary-files", type=int, default=None)
+    check.add_argument("--hotspot-min-commits", type=int, default=None)
+    check.add_argument("--hotspot-min-churn", type=int, default=None)
+    check.add_argument("--dependency-graph", action="append", default=[])
+    check.add_argument("--max-dependency-fan-in", type=int, default=None)
+    check.add_argument("--max-dependency-fan-out", type=int, default=None)
+    check.add_argument("--allow-dependency-cycles", action="store_true")
+    check.add_argument("--evidence-report", action="append", default=[])
+    check.add_argument("--test-report", action="append", default=[])
+    check.add_argument("--min-tests", type=int, default=None)
+    check.add_argument("--max-skipped-tests", type=int, default=None)
+    check.add_argument("--max-skipped-percent", type=float, default=None)
+    check.add_argument("--require-evidence-provenance", action="store_true")
+    check.add_argument("--expected-source-commit", default=None)
+    check.add_argument("--max-evidence-age-seconds", type=int, default=None)
     return parser
 
 
@@ -49,9 +92,10 @@ def resolve_output_path(target: Path, output: str) -> Path:
 
 
 def run_check(args: argparse.Namespace) -> int:
+    locale = normalize_locale(args.locale)
     target = Path(args.target).resolve()
     if not target.exists() or not target.is_dir():
-        print(f"Target directory not found: {target}", file=sys.stderr)
+        print(translate(locale, "target_missing", target=target), file=sys.stderr)
         return 3
 
     output_dir = resolve_output_path(target, args.output)
@@ -60,22 +104,116 @@ def run_check(args: argparse.Namespace) -> int:
     try:
         waivers = load_waivers(args.waiver, target)
     except Exception as error:  # noqa: BLE001 - report config errors as operational failures.
-        print(f"Invalid waiver file: {error}", file=sys.stderr)
+        print(translate(locale, "invalid_waiver", error=error), file=sys.stderr)
+        return 3
+
+    try:
+        policy_config, policy_file = load_quality_policy(
+            target,
+            args.policy_file,
+            required=args.require_policy or bool(args.policy_sha256),
+            expected_sha256=args.policy_sha256,
+        )
+        scope_manifest = load_scope_manifest(target, args.scope_manifest)
+        provenance_policy = policy_config.get("provenance") or {}
+        if not isinstance(provenance_policy, dict):
+            raise ValueError("quality policy provenance must be an object")
+        require_provenance = args.require_evidence_provenance or provenance_policy.get("requireEvidence") is True
+        max_evidence_age = (
+            args.max_evidence_age_seconds
+            if args.max_evidence_age_seconds is not None
+            else provenance_policy.get("maxEvidenceAgeSeconds")
+        )
+        if max_evidence_age is not None:
+            max_evidence_age = int(max_evidence_age)
+            if max_evidence_age < 0:
+                raise ValueError("max evidence age must be non-negative")
+        budget_overrides = {
+            key: getattr(args, _camel_to_snake(key))
+            for key in BUDGET_KEYS
+        }
+        metrics, findings = analyze_quality_budgets(
+            target,
+            scope=scope_manifest,
+            profile=args.profile,
+            policy=policy_config,
+            overrides=budget_overrides,
+            disabled=args.disable_budgets,
+        )
+        change_summary, change_findings = analyze_change_requirements(scope_manifest, policy_config)
+        findings.extend(change_findings)
+        metrics["changeRequirements"] = change_summary
+        policy_path = None
+        if policy_file:
+            candidate = Path(policy_file)
+            policy_path = candidate if candidate.is_absolute() else target / candidate
+        metrics["policy"] = {
+            "path": policy_file,
+            "sha256": sha256_file(policy_path) if policy_path else None,
+            "digestVerified": bool(args.policy_sha256),
+            "required": bool(args.require_policy or args.policy_sha256),
+        }
+
+        tool_results, dependency_findings, dependency_summaries = analyze_dependency_graphs(
+            target,
+            args.dependency_graph,
+            policy_config,
+            profile=args.profile,
+            max_fan_in=args.max_dependency_fan_in,
+            max_fan_out=args.max_dependency_fan_out,
+            allow_cycles=args.allow_dependency_cycles,
+            require_provenance=require_provenance,
+            expected_source_commit=args.expected_source_commit,
+            max_age_seconds=max_evidence_age,
+        )
+        findings.extend(dependency_findings)
+        metrics["dependencyGraphs"] = dependency_summaries
+
+        evidence_results, evidence_findings, evidence_summary = analyze_evidence_reports(
+            target,
+            args.evidence_report,
+            policy_config,
+            require_provenance=require_provenance,
+            expected_source_commit=args.expected_source_commit,
+            max_age_seconds=max_evidence_age,
+        )
+        tool_results.extend(evidence_results)
+        findings.extend(evidence_findings)
+        metrics["evidence"] = evidence_summary
+
+        test_results, test_findings, test_summary = analyze_test_reports(
+            target,
+            args.test_report,
+            policy_config,
+            min_tests=args.min_tests,
+            max_skipped_tests=args.max_skipped_tests,
+            max_skipped_percent=args.max_skipped_percent,
+            require_provenance=require_provenance,
+            expected_source_commit=args.expected_source_commit,
+            max_age_seconds=max_evidence_age,
+        )
+        tool_results.extend(test_results)
+        findings.extend(test_findings)
+        metrics["tests"] = test_summary
+    except (OSError, ValueError) as error:
+        print(translate(locale, "invalid_configuration", error=error), file=sys.stderr)
         return 3
 
     stack = detect_stack(target)
-    findings = detect_builtin_findings(
+    findings.extend(detect_builtin_findings(
         target,
         include_pii=args.enable_pii,
         include_secrets=args.enable_secrets,
-    )
-    tool_results, tool_findings = run_external_tools(
+    ))
+    external_results, tool_findings = run_external_tools(
         target,
         output_dir,
         args.mode,
         enable_secrets=args.enable_secrets,
         enable_iac=not (args.disable_iac or args.no_iac),
+        run_project_tests=args.run_project_tests,
     )
+    tool_results.extend(external_results)
     findings.extend(tool_findings)
 
     if args.enable_coverage:
@@ -117,6 +255,8 @@ def run_check(args: argparse.Namespace) -> int:
         stack=stack,
         findings=findings,
         tool_results=tool_results,
+        metrics=metrics,
+        locale=locale,
     )
 
     exit_code = policy.exit_code
@@ -129,12 +269,28 @@ def run_check(args: argparse.Namespace) -> int:
     if "md" in formats or "markdown" in formats:
         write_markdown_report(report, output_dir)
 
-    print(f"{report['status']} score={report['score']['value']:.2f} threshold={report['score']['threshold']}")
+    print(translate(
+        locale,
+        "result",
+        status=report["status"],
+        score=report["score"]["value"],
+        threshold=report["score"]["threshold"],
+    ))
     if report["summary"].get("reasons"):
         for reason in report["summary"]["reasons"]:
             print(f"- {reason}")
-    print(f"Reports: {output_dir}")
+    print(translate(locale, "reports", path=output_dir))
     return exit_code
+
+
+def _camel_to_snake(value: str) -> str:
+    output = []
+    for char in value:
+        if char.isupper():
+            output.extend(("_", char.lower()))
+        else:
+            output.append(char)
+    return "".join(output)
 
 
 def entrypoint(argv: list[str] | None = None) -> int:

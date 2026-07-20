@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
+
+import defusedxml.ElementTree as ET
 
 from .detectors import detect_iac_files
 from .findings import Finding, normalize_severity
@@ -63,6 +66,7 @@ def run_command(
     timeout_seconds: int = 1800,
     acceptable_exit_codes: set[int] | None = None,
     output_path: Path | None = None,
+    inherit_environment: bool = False,
 ) -> ToolResult:
     acceptable = acceptable_exit_codes if acceptable_exit_codes is not None else {0}
     executable = command[0]
@@ -78,7 +82,7 @@ def run_command(
         result = subprocess.run(
             resolved_command,
             cwd=str(cwd),
-            env={**os.environ, **(env or {})},
+            env=_subprocess_environment(env, inherit=inherit_environment),
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -125,6 +129,79 @@ def run_command(
     )
 
 
+SAFE_SUBPROCESS_ENV_NAMES = {
+    "ALL_PROXY",
+    "COMSPEC",
+    "CURL_CA_BUNDLE",
+    "DOTNET_ROOT",
+    "GIT_SSL_CAINFO",
+    "HOME",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "JAVA_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_COLOR",
+    "NO_PROXY",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PYTHONIOENCODING",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_CACHE_HOME",
+}
+
+
+def _subprocess_environment(overrides: dict[str, str] | None, *, inherit: bool) -> dict[str, str]:
+    """Build a least-privilege environment for analyzers.
+
+    Project-owned test commands are the sole opt-in caller that inherits the
+    complete environment. Security analyzers receive only runtime, locale,
+    proxy, and CA settings plus values supplied by this package itself.
+    """
+    if inherit:
+        environment = dict(os.environ)
+    else:
+        allowed = {name.upper() for name in SAFE_SUBPROCESS_ENV_NAMES}
+        environment = {name: value for name, value in os.environ.items() if name.upper() in allowed}
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+    environment.setdefault("NO_COLOR", "1")
+    environment.update(overrides or {})
+    return environment
+
+
+def _terraform_file_lists(iac_files: list[str]) -> tuple[list[str], list[str]]:
+    """Return Terraform entrypoints and the complete safe projection list."""
+
+    primary: list[str] = []
+    projection: list[str] = []
+    for value in iac_files:
+        name = PurePosixPath(value.replace("\\", "/")).name.lower()
+        is_primary = name.endswith((".tf", ".tf.json"))
+        is_auxiliary = name.endswith((".tfvars", ".tfvars.json")) or name == ".terraform.lock.hcl"
+        if is_primary:
+            primary.append(value)
+        if is_primary or is_auxiliary:
+            projection.append(value)
+    return sorted(set(primary)), sorted(set(projection))
+
+
 def run_external_tools(
     root: Path,
     reports_dir: Path,
@@ -132,15 +209,18 @@ def run_external_tools(
     *,
     enable_secrets: bool = False,
     enable_iac: bool = True,
+    run_project_tests: bool = False,
 ) -> tuple[list[ToolResult], list[Finding]]:
     if mode in {"quick", "offline"}:
         return [], []
 
     raw_dir = reports_dir / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_raw_dir(raw_dir)
     results: list[ToolResult] = []
     findings: list[Finding] = []
     iac_files = detect_iac_files(root)
+    terraform_primary_files, terraform_projection_files = _terraform_file_lists(iac_files)
+    flavor = _quality_gate_flavor()
 
     tool_specs = [
         ("megalinter", lambda current_root, current_raw: _run_megalinter(current_root, current_raw)),
@@ -174,6 +254,35 @@ def run_external_tools(
         ("osv-scanner", lambda current_root, current_raw: _run_osv_scanner(current_root, current_raw)),
         ("jscpd", lambda current_root, current_raw: _run_jscpd(current_root, current_raw)),
     ]
+    if flavor == "generic":
+        # Terrascan's MegaLinter project adapter recursively inspects every
+        # directory, including bin/obj generated concurrently by C# linters.
+        # Run it as a first-class tool against a Terraform-only projection so
+        # project/cross-file rules remain intact without hiding legitimate
+        # source directories from the other language analyzers.
+        tool_specs.insert(
+            0,
+            (
+                "terrascan",
+                lambda current_root, current_raw: _run_terrascan(
+                    current_root,
+                    current_raw,
+                    terraform_primary_files,
+                    terraform_projection_files,
+                )
+                if enable_iac and terraform_primary_files
+                else ToolResult(
+                    name="terrascan",
+                    status="skipped",
+                    summary={
+                        "reason": "IaC scanning disabled by --disable-iac."
+                        if not enable_iac
+                        else "No Terraform configuration files detected.",
+                        "iacFiles": len(terraform_primary_files),
+                    },
+                ),
+            ),
+        )
 
     for name, runner in tool_specs:
         result = runner(root, raw_dir)
@@ -184,12 +293,132 @@ def run_external_tools(
         results.append(result)
         findings.extend(parsed_findings)
 
-    test_result, test_findings = run_project_tests(root, raw_dir)
-    if test_result:
-        results.append(test_result)
-        findings.extend(test_findings)
+    if run_project_tests:
+        test_result, test_findings = _run_project_tests(root, raw_dir)
+        if test_result:
+            results.append(test_result)
+            findings.extend(test_findings)
 
     return results, findings
+
+
+RAW_EVIDENCE_MARKER = ".code-approval-quality-gate-owned"
+RAW_EVIDENCE_FILES = {
+    "checkov.json",
+    "gitleaks.json",
+    "osv-scanner.json",
+    "semgrep.json",
+    "terrascan.json",
+    "trivy.json",
+    *{
+        f"{tool}.{stream}.log"
+        for tool in (
+            "checkov",
+            "gitleaks",
+            "jscpd",
+            "megalinter",
+            "osv-scanner",
+            "project-tests",
+            "semgrep",
+            "terrascan",
+            "trivy",
+        )
+        for stream in ("stdout", "stderr")
+    },
+}
+RAW_EVIDENCE_DIRS = {"jscpd", "megalinter"}
+
+
+def _prepare_raw_dir(raw_dir: Path) -> None:
+    if raw_dir.is_symlink():
+        raise RuntimeError(f"Refusing unsafe raw evidence directory symlink: {raw_dir}")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    marker = raw_dir / RAW_EVIDENCE_MARKER
+    if marker.is_symlink():
+        raise RuntimeError(f"Refusing unsafe raw evidence marker symlink: {marker}")
+
+    for name in RAW_EVIDENCE_FILES | RAW_EVIDENCE_DIRS:
+        path = raw_dir / name
+        if path.is_symlink():
+            raise RuntimeError(f"Refusing unsafe raw evidence output symlink: {path}")
+
+    if marker.is_file():
+        for name in RAW_EVIDENCE_FILES:
+            path = raw_dir / name
+            if path.is_file():
+                path.unlink()
+        for name in RAW_EVIDENCE_DIRS:
+            path = raw_dir / name
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+
+    marker.write_text("Owned by code-approval-quality-gate.\n", encoding="utf-8")
+
+
+MEGALINTER_ENABLED_LINTERS = ",".join(
+    [
+        "ACTION_ACTIONLINT",
+        "BASH_SHELLCHECK",
+        "CSHARP_CSHARPIER",
+        "CSHARP_DOTNET_FORMAT",
+        "CSHARP_ROSLYNATOR",
+        "DOCKERFILE_HADOLINT",
+        "HTML_HTMLHINT",
+        "JAVASCRIPT_ES",
+        "MARKDOWN_MARKDOWNLINT",
+        "POWERSHELL_POWERSHELL",
+        "TYPESCRIPT_STANDARD",
+        "XML_XMLLINT",
+        "YAML_YAMLLINT",
+    ]
+)
+
+MEGALINTER_GENERIC_DUPLICATE_LINTERS = ",".join(
+    [
+        "COPYPASTE_JSCPD",
+        "REPOSITORY_CHECKOV",
+        "REPOSITORY_GIT_DIFF",
+        "REPOSITORY_GITLEAKS",
+        "REPOSITORY_OSV_SCANNER",
+        "REPOSITORY_SEMGREP",
+        "REPOSITORY_TRIVY",
+        "TERRAFORM_TERRASCAN",
+    ]
+)
+
+INSTALLED_CONFIG_DIR = Path("/opt/quality-sidecar/sidecar/config")
+SOURCE_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+MEGALINTER_CONFIG_DIR = (INSTALLED_CONFIG_DIR if INSTALLED_CONFIG_DIR.is_dir() else SOURCE_CONFIG_DIR).resolve()
+MEGALINTER_ESLINT_CONFIG_DIR = str(MEGALINTER_CONFIG_DIR)
+ESLINT_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "eslint.config.mjs")
+MEGALINTER_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "megalinter-ci.yml")
+CHECKOV_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "checkov-ci.yml")
+GITLEAKS_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "gitleaks-ci.toml")
+GITLEAKS_TRUSTED_IGNORE = str(MEGALINTER_CONFIG_DIR / "gitleaksignore-ci")
+JSCPD_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "jscpd-ci.json")
+OSV_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "osv-scanner-ci.toml")
+TRIVY_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "trivy-ci.yaml")
+TRIVY_TRUSTED_IGNORE = str(MEGALINTER_CONFIG_DIR / "trivyignore-ci")
+TFLINT_TRUSTED_CONFIG = str(MEGALINTER_CONFIG_DIR / "tflint-ci.hcl")
+QUALITY_GATE_FLAVOR_FILE = Path("/etc/code-approval/quality-gate-flavor")
+
+
+def _quality_gate_flavor() -> str:
+    if QUALITY_GATE_FLAVOR_FILE.is_file():
+        try:
+            flavor = QUALITY_GATE_FLAVOR_FILE.read_text(encoding="utf-8").strip().lower()
+        except OSError as error:
+            raise RuntimeError(f"Unable to read baked quality-gate flavor: {error}") from error
+    else:
+        # Source-checkout fallback for local development and unit tests. The
+        # production image always contains the root-owned file above.
+        flavor = os.environ.get("QUALITY_GATE_FLAVOR", "generic").strip().lower()
+
+    if flavor not in {"generic", "dotnetweb"}:
+        raise RuntimeError(f"Unsupported quality-gate flavor: {flavor or '<empty>'}")
+    return flavor
 
 
 def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
@@ -203,9 +432,43 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         "APPLY_FIXES": "none",
         "PRINT_ALL_FILES": "false",
         "SHOW_ELAPSED_TIME": "true",
-        "FILTER_REGEX_EXCLUDE": r"(\.quality/|node_modules/|coverage/|dist/|tmp/)",
+        # MegaLinter otherwise treats formatter failures as warnings. The
+        # quality gate must reject unformatted code instead of silently
+        # approving it as a successful analyzer run.
+        "FORMATTERS_DISABLE_ERRORS": "false",
+        "FILTER_REGEX_EXCLUDE": _megalinter_exclude_regex(root),
+        "MEGALINTER_CONFIG": MEGALINTER_TRUSTED_CONFIG,
+        # DevSkim is a project-mode analyzer and scans the workspace directly,
+        # so MegaLinter's file-list filter does not protect it from reports
+        # produced concurrently by other analyzers. Keep gate-owned output out
+        # of scope to prevent findings against the generated CycloneDX SBOM.
+        "REPOSITORY_DEVSKIM_ARGUMENTS": (
+            "--ignore-globs **/.git/**,**/megalinter-reports/**,**/.quality/**"
+        ),
+        # MegaLinter's activation probe prepends the workspace even when a
+        # rules path is absolute. A generated relative path reaches the same
+        # root-owned config from arbitrary GitLab checkout locations.
+        "JAVASCRIPT_ES_RULES_PATH": _megalinter_rules_path(root),
+        "JAVASCRIPT_ES_CONFIG_FILE": "eslint.config.mjs",
+        # An explicit absolute --config prevents a project file with the same
+        # name from winning MegaLinter's normal workspace-first lookup.
+        "JAVASCRIPT_ES_ARGUMENTS": f"--config {ESLINT_TRUSTED_CONFIG} --no-ignore --no-inline-config",
+        "TERRAFORM_TFLINT_RULES_PATH": str(MEGALINTER_CONFIG_DIR),
+        "TERRAFORM_TFLINT_CONFIG_FILE": Path(TFLINT_TRUSTED_CONFIG).name,
     }
-    return run_command(
+    # The portable flavor retains MegaLinter's language auto-detection. The
+    # smaller dotnetweb flavor is deliberately constrained to linters shipped
+    # by that base image so a missing analyzer is an operational error rather
+    # than an accidental cross-language promise.
+    if _quality_gate_flavor() == "dotnetweb":
+        env["ENABLE_LINTERS"] = MEGALINTER_ENABLED_LINTERS
+    else:
+        # These analyzers run as first-class sidecar tools with normalized
+        # findings. Git diff is also incompatible with the metadata-free
+        # workspace projection used by the GitLab container contract. Retain
+        # automatic language linter discovery in the portable image.
+        env["DISABLE_LINTERS"] = MEGALINTER_GENERIC_DUPLICATE_LINTERS
+    result = run_command(
         "megalinter",
         command,
         raw_dir,
@@ -214,18 +477,132 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         acceptable_exit_codes={0, 1},
         output_path=raw_dir / "megalinter",
     )
+    output_directory = Path(result.output_path or "")
+    evidence_logs = _megalinter_evidence_logs(output_directory)
+    if result.status not in {"missing", "timeout", "error"} and not evidence_logs:
+        result.status = "error"
+        result.error = "MegaLinter did not produce the required per-analyzer execution logs."
+        result.summary["evidenceValid"] = False
+        return result
+    if evidence_logs:
+        result.summary["evidenceValid"] = True
+        result.summary["executedAnalyzers"] = sorted(
+            {
+                path.stem.removesuffix("-SUCCESS").removesuffix("-ERROR").removesuffix("-suggestions")
+                for path in evidence_logs
+            }
+        )
+    if result.exit_code == 1:
+        error_logs = _megalinter_error_logs(output_directory)
+        fatal_logs = [
+            path
+            for path in error_logs
+            if any(
+                marker in _read_text(path)
+                for marker in ("Fatal error while calling", "Failed to initialize plugins")
+            )
+        ]
+        if not error_logs:
+            result.status = "error"
+            result.error = "MegaLinter failed without producing analyzer logs."
+        elif fatal_logs:
+            result.status = "error"
+            result.error = "One or more MegaLinter analyzers could not start."
+            result.summary["fatalAnalyzers"] = [path.stem.removesuffix("-ERROR") for path in fatal_logs]
+        else:
+            result.status = "findings"
+        result.summary["failedAnalyzers"] = [path.stem.removesuffix("-ERROR") for path in error_logs]
+    return result
+
+
+def _megalinter_exclude_regex(root: Path) -> str:
+    # Match dependency/output directories only below the analyzed root. A
+    # plain `tmp/` expression also matched the `/tmp/...` smoke/GitLab mount
+    # prefix and silently reduced MegaLinter to a zero-file run. Windows may
+    # expose the same temporary directory through short and canonical path
+    # spellings, so accept both without broadening the match outside the root.
+    root_candidates = {
+        (root if root.is_absolute() else root.absolute()).as_posix().rstrip("/") or "/",
+        root.resolve().as_posix().rstrip("/") or "/",
+    }
+    directory_suffix = r"(?:.*?/)?(?:\.quality|node_modules|coverage|dist|tmp)(?:/|$)"
+    alternatives = [
+        rf"{'' if candidate == '/' else re.escape(candidate)}/{directory_suffix}"
+        for candidate in sorted(root_candidates)
+    ]
+    return rf"^(?:{'|'.join(alternatives)})"
+
+
+def _megalinter_rules_path(root: Path) -> str:
+    """Return a relative config path when the host filesystem permits it."""
+
+    try:
+        return os.path.relpath(MEGALINTER_CONFIG_DIR, root)
+    except ValueError:
+        # Windows cannot express a relative path across drive letters. This
+        # branch is useful for source-tree tests/local invocation; the Linux
+        # production image always takes the relative-path branch above.
+        return str(MEGALINTER_CONFIG_DIR)
+
+
+def _megalinter_error_logs(output_dir: Path) -> list[Path]:
+    logs_dir = output_dir / "linters_logs"
+    return sorted(logs_dir.glob("*-ERROR.log")) if logs_dir.is_dir() else []
+
+
+def _megalinter_evidence_logs(output_dir: Path) -> list[Path]:
+    logs_dir = output_dir / "linters_logs"
+    if not logs_dir.is_dir() or logs_dir.is_symlink():
+        return []
+    return sorted(
+        path
+        for path in logs_dir.glob("*.log")
+        if path.is_file() and not path.is_symlink() and path.stat().st_size > 0 and not path.name.endswith("-suggestions.log")
+    )
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _run_semgrep(root: Path, raw_dir: Path) -> ToolResult:
     output = raw_dir / "semgrep.json"
-    return run_command(
+    result = run_command(
         "semgrep",
-        ["semgrep", "scan", "--config=auto", "--json", "--output", str(output), str(root)],
+        [
+            "semgrep",
+            "scan",
+            "--config=p/default",
+            "--metrics=off",
+            "--no-git-ignore",
+            "--x-ignore-semgrepignore-files",
+            "--disable-nosem",
+            "--exclude",
+            ".git",
+            "--exclude",
+            ".quality",
+            "--exclude",
+            "node_modules",
+            "--json",
+            "--output",
+            str(output),
+            str(root),
+        ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
+    result.summary["analysisInput"] = {
+        "kind": "ruleset",
+        "source": "semgrep-registry:p/default",
+        "pinned": False,
+        "networkRequired": True,
+    }
+    return result
 
 
 def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
@@ -234,17 +611,22 @@ def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
         "gitleaks",
         [
             "gitleaks",
-            "detect",
-            "--source",
-            str(root),
+            "--redact=100",
+            "--no-banner",
+            "--config",
+            GITLEAKS_TRUSTED_CONFIG,
+            "--gitleaks-ignore-path",
+            GITLEAKS_TRUSTED_IGNORE,
+            "--ignore-gitleaks-allow",
             "--report-format",
             "json",
             "--report-path",
             str(output),
-            "--no-git",
+            "dir",
+            str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
@@ -253,11 +635,18 @@ def _run_gitleaks(root: Path, raw_dir: Path) -> ToolResult:
 def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult:
     output = raw_dir / "trivy.json"
     scanners = "vuln,misconfig,secret" if enable_secrets else "vuln,misconfig"
-    return run_command(
+    skipped_directories = [root / name for name in (".git", ".quality", "node_modules", "vendor")]
+    skip_args = [argument for directory in skipped_directories for argument in ("--skip-dirs", str(directory))]
+    result = run_command(
         "trivy",
         [
             "trivy",
+            "--config",
+            TRIVY_TRUSTED_CONFIG,
             "fs",
+            "--ignorefile",
+            TRIVY_TRUSTED_IGNORE,
+            "--show-suppressed",
             "--scanners",
             scanners,
             "--format",
@@ -266,28 +655,229 @@ def _run_trivy(root: Path, raw_dir: Path, *, enable_secrets: bool) -> ToolResult
             str(output),
             "--exit-code",
             "0",
+            *skip_args,
             str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0},
         output_path=output,
     )
+    result.summary["analysisInput"] = {
+        "kind": "vulnerability-database",
+        "source": "ghcr.io/aquasecurity/trivy-db",
+        "pinned": False,
+        "networkRequired": True,
+    }
+    return result
+
+
+def _copy_stdout_to_output(result: ToolResult, output: Path) -> None:
+    stdout_path = Path(result.stdout_path) if result.stdout_path else None
+    if stdout_path and stdout_path.exists():
+        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+
+def _safe_projection_path(value: str) -> Path:
+    normalized = value.replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    if (
+        not normalized
+        or relative.is_absolute()
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError(f"Unsafe Terraform projection path: {value!r}")
+    return Path(*relative.parts)
+
+
+def _copy_terraform_projection(root: Path, destination: Path, files: list[str]) -> set[str]:
+    root_resolved = root.resolve(strict=True)
+    copied: set[str] = set()
+    for value in files:
+        relative = _safe_projection_path(value)
+        source = root / relative
+        current = root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"Terraform projection source traverses a symbolic link: {value}")
+        if not source.is_file():
+            raise ValueError(f"Terraform projection source is not a regular file: {value}")
+        try:
+            source.resolve(strict=True).relative_to(root_resolved)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Terraform projection source escapes the analysis root: {value}") from error
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target, follow_symlinks=False)
+        copied.add(relative.as_posix())
+    return copied
+
+
+def _add_terraform_projection_anchors(
+    destination: Path,
+    primary_files: list[str],
+    projection_files: list[str],
+) -> list[str]:
+    """Keep Terrascan project traversal valid when Terraform starts below the root.
+
+    Terrascan 1.19.9 reports scan_errors for every traversed ancestor that has
+    no Terraform file of its own. Comment-only anchors make those directories
+    valid without changing the analyzed resources or exposing non-IaC files.
+    """
+
+    directories_with_config: set[Path] = set()
+    traversed_directories: set[Path] = {Path()}
+    for value in primary_files:
+        relative = _safe_projection_path(value)
+        directories_with_config.add(relative.parent)
+    for value in projection_files:
+        relative = _safe_projection_path(value)
+        current = Path()
+        for part in relative.parent.parts:
+            current = current / part
+            traversed_directories.add(current)
+
+    anchors: list[str] = []
+    for directory in sorted(traversed_directories - directories_with_config, key=lambda item: item.as_posix()):
+        suffix = 0
+        while True:
+            name = "quality_gate_projection_anchor.tf" if suffix == 0 else f"quality_gate_projection_anchor_{suffix}.tf"
+            anchor = destination / directory / name
+            if not anchor.exists():
+                break
+            suffix += 1
+        anchor.write_text("# Trusted projection anchor for Terrascan directory traversal.\n", encoding="utf-8")
+        anchors.append((directory / name).as_posix())
+    return anchors
+
+
+def _sanitize_terrascan_evidence(payload: Any, projection: Path, allowed_files: set[str]) -> dict[str, Any]:
+    _validate_tool_payload("terrascan", payload)
+    results = payload["results"]
+    summary = results["scan_summary"]
+    scan_target = summary.get("file/folder")
+    try:
+        if not isinstance(scan_target, str) or Path(scan_target).resolve(strict=True) != projection.resolve(strict=True):
+            raise ValueError("Terrascan report target does not match the trusted projection")
+    except OSError as error:
+        raise ValueError("Terrascan report target could not be resolved") from error
+
+    for collection_name in ("violations", "skipped_violations"):
+        for item in results.get(collection_name) or []:
+            file_value = item.get("file")
+            if not isinstance(file_value, str) or not file_value:
+                raise ValueError("Terrascan reported a finding without a trusted file path")
+            normalized = _safe_projection_path(str(file_value)).as_posix()
+            if normalized not in allowed_files:
+                raise ValueError(f"Terrascan reported a file outside the trusted projection: {file_value}")
+            item["file"] = normalized
+    summary["file/folder"] = "."
+    return payload
+
+
+def _run_terrascan(
+    root: Path,
+    raw_dir: Path,
+    primary_files: list[str],
+    projection_files: list[str],
+) -> ToolResult:
+    output = raw_dir / "terrascan.json"
+    try:
+        with tempfile.TemporaryDirectory(prefix="code-approval-terrascan-") as temporary:
+            projection = Path(temporary)
+            allowed_files = _copy_terraform_projection(root, projection, projection_files)
+            anchors = _add_terraform_projection_anchors(projection, primary_files, projection_files)
+            result = run_command(
+                "terrascan",
+                [
+                    "terrascan",
+                    "scan",
+                    "--iac-type",
+                    "terraform",
+                    "--iac-dir",
+                    str(projection),
+                    "--output",
+                    "json",
+                ],
+                raw_dir,
+                cwd=MEGALINTER_CONFIG_DIR,
+                acceptable_exit_codes={0, 3},
+                output_path=output,
+            )
+            _copy_stdout_to_output(result, output)
+            if result.status not in {"missing", "timeout", "error"}:
+                payload, evidence_error = _load_json_evidence(str(output))
+                if evidence_error is not None:
+                    result.status = "error"
+                    result.error = f"Invalid analyzer evidence: {evidence_error}."
+                    result.summary["evidenceValid"] = False
+                else:
+                    try:
+                        sanitized = _sanitize_terrascan_evidence(payload, projection, allowed_files)
+                        output.write_text(
+                            json.dumps(sanitized, ensure_ascii=False, separators=(",", ":")) + "\n",
+                            encoding="utf-8",
+                        )
+                    except (TypeError, ValueError) as error:
+                        result.status = "error"
+                        result.error = f"Invalid analyzer evidence: {error}."
+                        result.summary["evidenceValid"] = False
+    except (OSError, ValueError) as error:
+        return ToolResult(
+            name="terrascan",
+            status="error",
+            output_path=str(output),
+            error=f"Unable to build trusted Terraform projection: {error}",
+            summary={"evidenceValid": False},
+        )
+
+    result.summary.update(
+        {
+            "analysisInput": {
+                "kind": "built-in-policy-bundle",
+                "source": "terrascan@1.19.9",
+                "pinned": True,
+                "networkRequired": False,
+            },
+            "runtimeInputs": [
+                {
+                    "kind": "terraform-registry-metadata",
+                    "source": "registry.terraform.io",
+                    "pinned": False,
+                    "networkRequired": True,
+                }
+            ],
+            "iacFiles": len(primary_files),
+            "iacFileSamples": primary_files[:20],
+            "projectionFiles": len(projection_files),
+            "projectionAnchors": len(anchors),
+        }
+    )
+    return result
 
 
 def _run_checkov(root: Path, raw_dir: Path, iac_files: list[str]) -> ToolResult:
     output = raw_dir / "checkov.json"
     result = run_command(
         "checkov",
-        ["checkov", "-d", str(root), "-o", "json", "--quiet"],
+        [
+            "checkov",
+            "--config-file",
+            CHECKOV_TRUSTED_CONFIG,
+            f"--directory={root}",
+            "--output",
+            "json",
+            "--quiet",
+            "--skip-download",
+        ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
-    stdout_path = Path(result.stdout_path) if result.stdout_path else None
-    if stdout_path and stdout_path.exists():
-        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    _copy_stdout_to_output(result, output)
     result.summary["iacFiles"] = len(iac_files)
     result.summary["iacFileSamples"] = iac_files[:20]
     return result
@@ -297,15 +887,25 @@ def _run_osv_scanner(root: Path, raw_dir: Path) -> ToolResult:
     output = raw_dir / "osv-scanner.json"
     result = run_command(
         "osv-scanner",
-        ["osv-scanner", "--recursive", "--format", "json", str(root)],
+        [
+            "osv-scanner",
+            "scan",
+            "source",
+            "--recursive",
+            "--no-ignore",
+            "--allow-no-lockfiles",
+            "--config",
+            OSV_TRUSTED_CONFIG,
+            "--format",
+            "json",
+            str(root),
+        ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output,
     )
-    stdout_path = Path(result.stdout_path) if result.stdout_path else None
-    if stdout_path and stdout_path.exists():
-        output.write_text(stdout_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    _copy_stdout_to_output(result, output)
     stderr_path = Path(result.stderr_path) if result.stderr_path else None
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path and stderr_path.exists() else ""
     if result.status == "error" and "No package sources found" in stderr_text:
@@ -313,6 +913,12 @@ def _run_osv_scanner(root: Path, raw_dir: Path) -> ToolResult:
         result.status = "ok"
         result.exit_code = 0
         result.error = None
+    result.summary["analysisInput"] = {
+        "kind": "vulnerability-database",
+        "source": "osv.dev",
+        "pinned": False,
+        "networkRequired": True,
+    }
     return result
 
 
@@ -322,25 +928,27 @@ def _run_jscpd(root: Path, raw_dir: Path) -> ToolResult:
         "jscpd",
         [
             "jscpd",
+            "--config",
+            JSCPD_TRUSTED_CONFIG,
+            "--no-gitignore",
             "--silent",
             "--reporters",
             "json",
             "--ignore",
-            "**/.quality/**,**/node_modules/**,.quality/**,node_modules/**",
+            "**/*.md,**/.quality/**,**/node_modules/**,**/obj/**,**/bin/**,.quality/**,node_modules/**,obj/**,bin/**",
             "--output",
             str(output_dir),
-            ".",
+            str(root),
         ],
         raw_dir,
-        cwd=root,
+        cwd=MEGALINTER_CONFIG_DIR,
         acceptable_exit_codes={0, 1},
         output_path=output_dir / "jscpd-report.json",
     )
     report = output_dir / "jscpd-report.json"
-    if not report.exists():
-        matches = list(output_dir.rglob("*.json")) if output_dir.exists() else []
-        if matches:
-            result.output_path = str(matches[0])
+    # The exact reporter contract is deliberate. Picking an arbitrary JSON
+    # file could normalize unrelated or attacker-controlled evidence.
+    result.output_path = str(report)
     return result
 
 
@@ -672,30 +1280,73 @@ def _int_attr(element: ET.Element, name: str) -> int | None:
     return int(value) if value is not None and value != "" else None
 
 
-def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
+def _missing_npm_workspaces(root: Path, package_json: Path) -> list[str]:
+    try:
+        package = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    workspaces = package.get("workspaces", [])
+    patterns = workspaces.get("packages", []) if isinstance(workspaces, dict) else workspaces
+    if not isinstance(patterns, list):
+        return []
+
+    missing: list[str] = []
+    for pattern in patterns:
+        if not isinstance(pattern, str):
+            continue
+        matches = [path for path in root.glob(pattern) if (path / "package.json").is_file()]
+        if not matches:
+            missing.append(pattern)
+    return missing
+
+
+def _project_test_outcome(result: ToolResult, *, path: str, message: str) -> tuple[ToolResult, list[Finding]]:
+    if result.exit_code in {None, 0}:
+        return result, []
+    result.status = "findings"
+    return result, [
+        Finding(
+            tool="project-tests",
+            rule="tests.failed",
+            severity="high",
+            category="tests",
+            path=path,
+            message=message,
+        )
+    ]
+
+
+def _run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
     package_json = root / "package.json"
     if package_json.exists() and shutil.which("npm"):
+        missing_workspaces = _missing_npm_workspaces(root, package_json)
+        if missing_workspaces:
+            scope = os.environ.get("QUALITY_CHECK_SCOPE", "full")
+            if scope not in {"changed", "paths"}:
+                return ToolResult(
+                    name="project-tests",
+                    status="error",
+                    error="Project tests cannot run because npm workspaces are absent from the full checkout.",
+                    summary={"missingWorkspaces": missing_workspaces},
+                ), []
+            return ToolResult(
+                name="project-tests",
+                status="skipped",
+                summary={
+                    "reason": "Project tests require npm workspaces absent from the analyzed checkout.",
+                    "missingWorkspaces": missing_workspaces,
+                },
+            ), []
         result = run_command(
             "project-tests",
             ["npm", "test", "--if-present"],
             raw_dir,
             cwd=root,
             acceptable_exit_codes={0, 1},
+            inherit_environment=True,
         )
-        findings = []
-        if result.exit_code not in {None, 0}:
-            result.status = "findings"
-            findings.append(
-                Finding(
-                    tool="project-tests",
-                    rule="tests.failed",
-                    severity="high",
-                    category="tests",
-                    path="package.json",
-                    message="Project test command failed.",
-                )
-            )
-        return result, findings
+        return _project_test_outcome(result, path="package.json", message="Project test command failed.")
 
     pyproject = root / "pyproject.toml"
     tests_dir = root / "tests"
@@ -706,59 +1357,172 @@ def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, lis
             raw_dir,
             cwd=root,
             acceptable_exit_codes={0, 1},
+            inherit_environment=True,
         )
-        findings = []
-        if result.exit_code not in {None, 0}:
-            result.status = "findings"
-            findings.append(
-                Finding(
-                    tool="project-tests",
-                    rule="tests.failed",
-                    severity="high",
-                    category="tests",
-                    path="tests",
-                    message="Python unittest discovery failed.",
-                )
-            )
-        return result, findings
+        return _project_test_outcome(result, path="tests", message="Python unittest discovery failed.")
 
     return None, []
 
 
+def run_project_tests(root: Path, raw_dir: Path) -> tuple[ToolResult | None, list[Finding]]:
+    """Run project-owned tests only after an explicit caller opt-in."""
+    return _run_project_tests(root, raw_dir)
+
+
 def parse_json(path: str | None) -> Any | None:
+    """Compatibility helper for callers that do not require evidence proof."""
+    payload, _ = _load_json_evidence(path)
+    return payload
+
+
+def _load_json_evidence(path: str | None) -> tuple[Any | None, str | None]:
     if not path:
-        return None
+        return None, "the analyzer did not declare an output path"
+    file_path = Path(path)
+    if not file_path.is_file() or file_path.is_symlink():
+        return None, "the analyzer did not produce the expected regular JSON report"
     try:
-        file_path = Path(path)
-        if file_path.is_dir():
-            matches = sorted(file_path.rglob("*.json"))
-            file_path = matches[0] if matches else file_path
-        if not file_path.exists() or file_path.is_dir():
-            return None
-        text = file_path.read_text(encoding="utf-8", errors="replace").strip()
-        if not text:
-            return None
-        return json.loads(text)
-    except (OSError, json.JSONDecodeError):
-        return None
+        text = file_path.read_text(encoding="utf-8", errors="strict").strip()
+    except (OSError, UnicodeError):
+        return None, "the analyzer JSON report could not be read as UTF-8"
+    if not text:
+        return None, "the analyzer JSON report is empty"
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        return None, "the analyzer JSON report is malformed"
+
+
+def _validate_tool_payload(name: str, payload: Any) -> None:
+    if name == "semgrep":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("Semgrep report needs a results array")
+    elif name == "gitleaks":
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+            raise ValueError("Gitleaks report needs an array of findings")
+    elif name == "trivy":
+        if not isinstance(payload, dict) or not isinstance(payload.get("Results"), list):
+            raise ValueError("Trivy report needs a Results array")
+    elif name == "terrascan":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), dict):
+            raise ValueError("Terrascan report needs a results object")
+        results = payload["results"]
+        summary = results.get("scan_summary")
+        violations = results.get("violations")
+        skipped = results.get("skipped_violations")
+        scan_errors = results.get("scan_errors")
+        counters = ("policies_validated", "violated_policies", "low", "medium", "high")
+        if (
+            not isinstance(summary, dict)
+            or not all(
+                isinstance(summary.get(counter), int)
+                and not isinstance(summary.get(counter), bool)
+                and summary[counter] >= 0
+                for counter in counters
+            )
+            or violations is not None
+            and (not isinstance(violations, list) or not all(isinstance(item, dict) for item in violations))
+            or skipped is not None
+            and (not isinstance(skipped, list) or not all(isinstance(item, dict) for item in skipped))
+            or scan_errors is not None
+            and (not isinstance(scan_errors, list) or bool(scan_errors))
+            or (summary["violated_policies"] == 0) != (not violations)
+        ):
+            raise ValueError("Terrascan report has an invalid summary or violation list")
+    elif name == "checkov":
+        documents = payload if isinstance(payload, list) else [payload]
+        if not documents or not all(
+            isinstance(item, dict)
+            and (
+                isinstance(item.get("results"), (dict, list))
+                or _is_official_empty_checkov_summary(item)
+            )
+            for item in documents
+        ):
+            raise ValueError("Checkov report needs results objects or an official empty summary")
+    elif name == "osv-scanner":
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("OSV-Scanner report needs a results array")
+    elif name == "jscpd":
+        if not isinstance(payload, dict) or not isinstance(payload.get("duplicates"), list):
+            raise ValueError("jscpd report needs a duplicates array")
+
+
+def _is_official_empty_checkov_summary(payload: dict[str, Any]) -> bool:
+    """Recognize Checkov 3.x's real zero-resource JSON contract.
+
+    Checkov omits ``results`` when no checks apply and emits only counters plus
+    its version. Accept that exact empty state without treating arbitrary `{}`
+    as successful analyzer evidence.
+    """
+    if "results" in payload:
+        return False
+    counters = ("passed", "failed", "skipped", "parsing_errors", "resource_count")
+    expected_keys = {*counters, "checkov_version"}
+    return (
+        set(payload) == expected_keys
+        and all(isinstance(payload.get(name), int) and not isinstance(payload.get(name), bool) for name in counters)
+        and all(payload[name] == 0 for name in counters)
+        and isinstance(payload.get("checkov_version"), str)
+        and bool(payload["checkov_version"].strip())
+    )
 
 
 def parse_tool_findings(name: str, result: ToolResult, root: Path) -> list[Finding]:
-    if result.status in {"missing", "timeout", "error"}:
+    if result.status in {"missing", "timeout", "error", "skipped"}:
         return []
-    if name == "semgrep":
-        return _parse_semgrep(parse_json(result.output_path), root)
-    if name == "gitleaks":
-        return _parse_gitleaks(parse_json(result.output_path), root)
-    if name == "trivy":
-        return _parse_trivy(parse_json(result.output_path), root)
-    if name == "checkov":
-        return _parse_checkov(parse_json(result.output_path), root)
-    if name == "osv-scanner":
-        return _parse_osv(parse_json(result.output_path), root)
-    if name == "jscpd":
-        return _parse_jscpd(parse_json(result.output_path), root)
-    return []
+    if name == "megalinter":
+        return _parse_megalinter(result)
+    parsers = {
+        "semgrep": _parse_semgrep,
+        "gitleaks": _parse_gitleaks,
+        "terrascan": _parse_terrascan,
+        "trivy": _parse_trivy,
+        "checkov": _parse_checkov,
+        "osv-scanner": _parse_osv,
+        "jscpd": _parse_jscpd,
+    }
+    parser = parsers.get(name)
+    if parser is None:
+        return []
+    payload, error = _load_json_evidence(result.output_path)
+    if error is None:
+        try:
+            _validate_tool_payload(name, payload)
+        except (TypeError, ValueError) as validation_error:
+            error = str(validation_error)
+    if error is not None:
+        result.status = "error"
+        result.error = f"Invalid analyzer evidence: {error}."
+        result.summary["evidenceValid"] = False
+        return []
+    try:
+        findings = parser(payload, root)
+    except (AttributeError, TypeError, ValueError):
+        result.status = "error"
+        result.error = "Invalid analyzer evidence: the report shape could not be normalized."
+        result.summary["evidenceValid"] = False
+        return []
+    result.summary["evidenceValid"] = True
+    return findings
+
+
+def _parse_megalinter(result: ToolResult) -> list[Finding]:
+    findings: list[Finding] = []
+    for log_path in _megalinter_error_logs(Path(result.output_path or "")):
+        analyzer = log_path.stem.removesuffix("-ERROR")
+        findings.append(
+            Finding(
+                tool="megalinter",
+                rule=f"megalinter.{analyzer.lower().replace('_', '-')}",
+                severity="high",
+                category="lint",
+                path="",
+                message=f"MegaLinter analyzer {analyzer} reported one or more blocking errors.",
+                metadata={"log": str(log_path)},
+            )
+        )
+    return findings
 
 
 def _normalize_path(value: str | None, root: Path) -> str:
@@ -810,50 +1574,116 @@ def _parse_gitleaks(payload: Any, root: Path) -> list[Finding]:
     return findings
 
 
+def _parse_terrascan(payload: Any, root: Path) -> list[Finding]:
+    findings: list[Finding] = []
+    results = (payload or {}).get("results", {})
+    for item in results.get("violations") or []:
+        findings.append(
+            Finding(
+                tool="terrascan",
+                rule=item.get("rule_id") or item.get("rule_name") or "terrascan.iac",
+                severity=item.get("severity") or "high",
+                category="iac",
+                path=_normalize_path(item.get("file"), root),
+                line=item.get("line") if isinstance(item.get("line"), int) else None,
+                message=item.get("description") or "Infrastructure-as-code issue detected by Terrascan.",
+                metadata={
+                    "ruleName": item.get("rule_name"),
+                    "policyCategory": item.get("category"),
+                    "resource": item.get("resource_name"),
+                    "resourceType": item.get("resource_type"),
+                    "module": item.get("module_name"),
+                },
+            )
+        )
+    for item in results.get("skipped_violations") or []:
+        findings.append(
+            Finding(
+                tool="terrascan",
+                rule=item.get("rule_id") or item.get("rule_name") or "terrascan.suppression",
+                severity="high",
+                category="policy-suppression",
+                path=_normalize_path(item.get("file"), root),
+                line=item.get("line") if isinstance(item.get("line"), int) else None,
+                message="Project-controlled Terrascan suppression is not trusted.",
+                metadata={
+                    "ruleName": item.get("rule_name"),
+                    "resource": item.get("resource_name"),
+                    "suppressedByProject": True,
+                },
+            )
+        )
+    return findings
+
+
 def _parse_trivy(payload: Any, root: Path) -> list[Finding]:
     findings: list[Finding] = []
     for result in (payload or {}).get("Results", []):
         target = _normalize_path(result.get("Target"), root)
         for vuln in result.get("Vulnerabilities", []) or []:
+            suppressed = _trivy_item_suppressed(vuln)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=vuln.get("VulnerabilityID", "trivy.vulnerability"),
-                    severity=normalize_severity(vuln.get("Severity")),
-                    category="vulnerability",
+                    severity="high" if suppressed else normalize_severity(vuln.get("Severity")),
+                    category="policy-suppression" if suppressed else "vulnerability",
                     path=target,
-                    message=vuln.get("Title") or vuln.get("Description") or "Vulnerability detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else vuln.get("Title") or vuln.get("Description") or "Vulnerability detected by Trivy."
+                    ),
                     metadata={
                         "package": vuln.get("PkgName"),
                         "installedVersion": vuln.get("InstalledVersion"),
                         "fixedVersion": vuln.get("FixedVersion"),
+                        "status": vuln.get("Status"),
+                        "suppressedByProject": suppressed,
                     },
                 )
             )
         for secret in result.get("Secrets", []) or []:
+            suppressed = _trivy_item_suppressed(secret)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=secret.get("RuleID", "trivy.secret"),
-                    severity=normalize_severity(secret.get("Severity") or "critical"),
-                    category="secrets",
+                    severity="high" if suppressed else normalize_severity(secret.get("Severity") or "critical"),
+                    category="policy-suppression" if suppressed else "secrets",
                     path=target,
                     line=secret.get("StartLine"),
-                    message=secret.get("Title") or "Secret detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else secret.get("Title") or "Secret detected by Trivy."
+                    ),
+                    metadata={"status": secret.get("Status"), "suppressedByProject": suppressed},
                 )
             )
         for misconfig in result.get("Misconfigurations", []) or []:
+            suppressed = _trivy_item_suppressed(misconfig)
             findings.append(
                 Finding(
                     tool="trivy",
                     rule=misconfig.get("ID", "trivy.misconfiguration"),
-                    severity=normalize_severity(misconfig.get("Severity")),
-                    category="misconfiguration",
+                    severity="high" if suppressed else normalize_severity(misconfig.get("Severity")),
+                    category="policy-suppression" if suppressed else "misconfiguration",
                     path=target,
-                    message=misconfig.get("Title") or "Misconfiguration detected by Trivy.",
+                    message=(
+                        "Project-controlled Trivy suppression is not trusted."
+                        if suppressed
+                        else misconfig.get("Title") or "Misconfiguration detected by Trivy."
+                    ),
+                    metadata={"status": misconfig.get("Status"), "suppressedByProject": suppressed},
                 )
             )
     return findings
+
+
+def _trivy_item_suppressed(item: dict[str, Any]) -> bool:
+    status = str(item.get("Status", "")).upper()
+    return status in {"EXCEPTION", "SUPPRESSED"} or item.get("IsSuppressed") is True
 
 
 def _parse_checkov(payload: Any, root: Path) -> list[Finding]:
@@ -874,6 +1704,25 @@ def _parse_checkov(payload: Any, root: Path) -> list[Finding]:
                     "resource": item.get("resource"),
                     "guideline": item.get("guideline"),
                     "checkClass": item.get("check_class"),
+                },
+            )
+        )
+    for item in _iter_checkov_skipped_checks(payload):
+        line_range = item.get("file_line_range") or []
+        line = line_range[0] if isinstance(line_range, list) and line_range else None
+        findings.append(
+            Finding(
+                tool="checkov",
+                rule=item.get("check_id", "checkov.suppression"),
+                severity="high",
+                category="policy-suppression",
+                path=_normalize_checkov_path(item, root),
+                line=line if isinstance(line, int) else None,
+                message="Project-controlled Checkov suppression is not trusted.",
+                metadata={
+                    "resource": item.get("resource"),
+                    "suppressedByProject": True,
+                    "suppressComment": item.get("suppress_comment"),
                 },
             )
         )
@@ -898,6 +1747,28 @@ def _iter_checkov_failed_checks(payload: Any) -> Iterable[dict[str, Any]]:
             yield from _iter_checkov_failed_checks(item)
     failed = payload.get("failed_checks") or []
     for item in failed:
+        if isinstance(item, dict):
+            yield item
+
+
+def _iter_checkov_skipped_checks(payload: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_checkov_skipped_checks(item)
+        return
+    if not isinstance(payload, dict):
+        return
+    results = payload.get("results")
+    if isinstance(results, dict):
+        skipped = results.get("skipped_checks") or []
+        for item in skipped:
+            if isinstance(item, dict):
+                yield item
+    elif isinstance(results, list):
+        for item in results:
+            yield from _iter_checkov_skipped_checks(item)
+    skipped = payload.get("skipped_checks") or []
+    for item in skipped:
         if isinstance(item, dict):
             yield item
 
