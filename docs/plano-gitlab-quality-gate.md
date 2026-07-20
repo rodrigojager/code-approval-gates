@@ -70,21 +70,22 @@ Não use `image:docker:user: 0`, DinD ou socket Docker para corrigir ownership. 
 O workflow de release é acionado por tag `quality-v*`. O primeiro flavor .NET é localizado pela tag:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
+ghcr.io/rodrigojager/code-approval-quality-gate:0.2.1-dotnetweb
 ```
 
 A base está temporariamente fixada por digest em MegaLinter v9.5.0/Alpine 3.23. MegaLinter v9.6/Alpine 3.24 com musl 1.2.6 provocou o crash `Failed to allocate signal stack for domain 0` no Semgrep em CPUs Intel afetadas, relacionado a [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933), com correção integrada em [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Atualize a base somente quando uma release do Semgrep incorporar a correção e as duas flavors passarem novamente por build, quick smoke e full smokes no CI.
 
-O workflow já implementa promoção sem reconstrução divergente, mas esse caminho ainda não foi exercitado por uma tag real e nenhuma tag/release deve ser criada nesta etapa:
+O workflow implementa promoção sem reconstrução divergente. A tag `quality-v0.2.0` exercitou a proteção e a matriz em 2026-07-20, mas foi bloqueada antes do candidato porque o gate total também alcançava a flavor `generic`, que não é publicada. Nenhuma imagem final foi criada nessa tentativa. A correção versionada é `0.2.1`:
 
 1. em push e Pull Request, a matriz `validate` faz build e smokes em modo read-only, sem login ou escrita no GHCR;
-2. em uma futura tag `quality-v*`, `release-candidate` constrói e envia uma tag intermediária `validation-*`, captura o digest produzido, baixa exatamente esse digest e repete os smokes;
-3. o mesmo candidate executa o scan Trivy completo, bloqueia qualquer vulnerabilidade `CRITICAL` corrigível e envia o relatório como artifact para auditoria;
-4. somente após essa validação, `publish` promove o mesmo digest para as tags finais com `docker buildx imagetools create`; esse job não reconstrói a imagem.
+2. em uma tag `quality-v*`, a matriz continua exigindo zero `CRITICAL` corrigível de sistema operacional nas duas flavors e zero em todas as classes na `dotnetweb` publicada;
+3. `release-candidate` constrói e envia uma tag intermediária `validation-*`, captura o digest produzido, baixa exatamente esse digest e repete os smokes;
+4. o mesmo candidate executa o scan Trivy completo, bloqueia qualquer vulnerabilidade `CRITICAL` corrigível e envia o relatório como artifact para auditoria;
+5. somente após essa validação, `publish` promove o mesmo digest para as tags finais com `docker buildx imagetools create`; esse job não reconstrói a imagem.
 
 As tags intermediárias `validation-*` e `promotion-*` são um risco operacional residual. Mantenha o package privado e defina política de retenção/limpeza antes de operar releases continuamente; não apague uma referência necessária durante uma execução em andamento.
 
-O scan local completo de 2026-07-15 encontrou zero `CRITICAL` corrigível nos pacotes Alpine, mas 13 ocorrências em toolchains/bibliotecas da flavor `dotnetweb` (e 18 na `generic`). Elas incluem componentes herdados Node, Go e .NET. Isso não invalida os smokes funcionais nem o piloto local, mas **bloqueia corretamente a primeira tag/imagem versionada**: remedeie e reexecute o scan completo até chegar a zero; não reduza a política do `release-candidate` para contornar o resultado.
+O scan do workflow de 2026-07-20 confirmou zero `CRITICAL` corrigível na `dotnetweb`. A `generic`, que permanece apenas como flavor de validação, ainda possui findings em toolchains/bibliotecas, mas zero em pacotes do sistema operacional. Esses findings não podem relaxar o gate da imagem publicada: a `dotnetweb` e seu candidato exato precisam permanecer com zero em todas as classes.
 
 Após o build, copie o digest real e configure no GitLab:
 
@@ -92,7 +93,7 @@ Após o build, copie o digest real e configure no GitLab:
 CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:DIGEST_REAL
 ```
 
-Não execute produção com `latest`, `0.2.0` ou apenas `0.2.0-dotnetweb`. A tag localiza o release; o digest imutável executa o job.
+Não execute produção com `latest`, `0.2.1` ou apenas `0.2.1-dotnetweb`. A tag localiza o release; o digest imutável executa o job.
 
 Mantenha o primeiro package privado enquanto revisa layers, labels, SBOM e proveniência. Se o GHCR continuar privado, use uma conta técnica com somente `read:packages`; armazene o PAT no cofre/runner, nunca no repositório, YAML, imagem, artifact ou log. Tornar o package público é uma decisão irreversível no GHCR.
 

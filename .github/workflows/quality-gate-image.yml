@@ -194,8 +194,8 @@ jobs:
           echo "Fixed CRITICAL toolchain/library findings: $library_count" >> "$GITHUB_STEP_SUMMARY"
           test "$os_count" -eq 0
 
-      - name: Block releases on any fixed critical vulnerability
-        if: startsWith(github.ref, 'refs/tags/quality-v')
+      - name: Block published dotnetweb releases on any fixed critical vulnerability
+        if: startsWith(github.ref, 'refs/tags/quality-v') && matrix.flavor == 'dotnetweb'
         shell: bash
         env:
           TRIVY_REPORT: trivy-critical-${{ matrix.flavor }}.json
