@@ -313,7 +313,13 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("aquasecurity/trivy-action@", workflow)
         self.assertEqual(workflow.count("timeout: 15m"), 2)
         self.assertIn("Enforce no fixed critical OS vulnerabilities", workflow)
-        self.assertIn("Block releases on any fixed critical vulnerability", workflow)
+        self.assertIn(
+            "Block published dotnetweb releases on any fixed critical vulnerability", workflow
+        )
+        self.assertIn(
+            "if: startsWith(github.ref, 'refs/tags/quality-v') && matrix.flavor == 'dotnetweb'",
+            workflow,
+        )
         self.assertIn("trivy-critical-${{ matrix.flavor }}", workflow)
         self.assertIn('release_version="${RELEASE_TAG#quality-v}"', workflow)
         self.assertIn("require('./package.json').version", workflow)

@@ -160,7 +160,7 @@ CODE_APPROVAL_QUALITY_POLICY_FILE=/etc/code-approval-gates/company-policy.json
 CODE_APPROVAL_QUALITY_POLICY_SHA256=<sha256>
 ```
 
-The release workflow builds `generic` and `dotnetweb` flavors. The initial .NET artifact is named `0.2.0-dotnetweb`, but production GitLab jobs must pin its published digest:
+The release workflow builds `generic` and `dotnetweb` flavors. The initial published .NET artifact is named `0.2.1-dotnetweb`, but production GitLab jobs must pin its published digest:
 
 ```text
 ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-dotnetweb-digest>

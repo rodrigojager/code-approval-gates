@@ -1,6 +1,6 @@
 {
   "name": "code-approval-gates",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Unified Code Approval Gates CLI with deterministic quality checks, AI semantic review, scopes, ignores, baselines, doctor, wizard, and CI/headless workflows.",
   "bin": {

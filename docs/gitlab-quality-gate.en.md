@@ -63,21 +63,22 @@ Do not use root, DinD, or a Docker socket as an ownership workaround.
 The first .NET flavor is located by:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
+ghcr.io/rodrigojager/code-approval-quality-gate:0.2.1-dotnetweb
 ```
 
 The base is temporarily pinned by digest to MegaLinter v9.5.0/Alpine 3.23. MegaLinter v9.6/Alpine 3.24 with musl 1.2.6 triggered `Failed to allocate signal stack for domain 0` in Semgrep on affected Intel CPUs, related to [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933), with the fix merged in [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Upgrade only after a Semgrep release contains the fix and both flavors pass build, quick smoke, and full-image smokes again in CI.
 
-The workflow now implements promotion without a divergent rebuild, but this path has not been exercised by a real tag and no tag/release should be created at this stage:
+The workflow implements promotion without a divergent rebuild. Tag `quality-v0.2.0` exercised the guard and validation matrix on 2026-07-20, but stopped before the candidate because the total gate also covered the non-published `generic` flavor. No final image was created by that attempt. The versioned correction is `0.2.1`:
 
 1. on pushes and pull requests, the `validate` matrix builds and runs smokes read-only, without logging in or writing to GHCR;
-2. on a future `quality-v*` tag, `release-candidate` builds and pushes an intermediate `validation-*` tag, captures the produced digest, pulls that exact digest, and repeats the smokes;
-3. the same candidate runs the full Trivy scan, blocks every fixed `CRITICAL` vulnerability, and uploads the report as an audit artifact;
-4. only after that validation, `publish` promotes the same digest to final tags with `docker buildx imagetools create`; the job does not rebuild the image.
+2. on a `quality-v*` tag, the matrix still requires zero fixed `CRITICAL` OS findings in both flavors and zero findings of every class in the published `dotnetweb` flavor;
+3. `release-candidate` builds and pushes an intermediate `validation-*` tag, captures the produced digest, pulls that exact digest, and repeats the smokes;
+4. the same candidate runs the full Trivy scan, blocks every fixed `CRITICAL` vulnerability, and uploads the report as an audit artifact;
+5. only after that validation, `publish` promotes the same digest to final tags with `docker buildx imagetools create`; the job does not rebuild the image.
 
 Intermediate `validation-*` and `promotion-*` tags remain an operational risk. Keep the package private and define retention/cleanup before operating releases continuously; do not delete a reference required by an in-progress run.
 
-The 2026-07-15 local full scan found zero fixed `CRITICAL` vulnerabilities in Alpine packages, but 13 occurrences in the `dotnetweb` flavor's embedded toolchains/libraries (and 18 in `generic`). They include inherited Node, Go, and .NET components. This does not invalidate the functional smokes or local pilot, but it **correctly blocks the first versioned tag/image**: remediate and repeat the full scan until it reaches zero; do not weaken `release-candidate` policy to bypass the result.
+The 2026-07-20 workflow scan confirmed zero fixed `CRITICAL` vulnerabilities in `dotnetweb`. The validation-only `generic` flavor still has toolchain/library findings but zero OS findings. Those findings do not relax the published-image gate: `dotnetweb` and its exact release candidate must remain at zero across every class.
 
 Run the final GitLab job by immutable digest:
 
@@ -85,7 +86,7 @@ Run the final GitLab job by immutable digest:
 CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:REAL_DIGEST
 ```
 
-Do not use `latest`, `0.2.0`, or a mutable flavor tag in production. Keep the first package private while reviewing layers, labels, SBOM, and provenance. If private, use a read-only `read:packages` service account stored in the runner/vault, never in repository YAML, image layers, artifacts, or logs. Making a GHCR package public is irreversible.
+Do not use `latest`, `0.2.1`, or a mutable flavor tag in production. Keep the first package private while reviewing layers, labels, SBOM, and provenance. If private, use a read-only `read:packages` service account stored in the runner/vault, never in repository YAML, image layers, artifacts, or logs. Making a GHCR package public is irreversible.
 
 ## 4. Governed policy
 

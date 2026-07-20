@@ -71,9 +71,9 @@ Mantenha Secret scanning e Push protection habilitados.
 
 Depois do merge e de atualizar `main` por fast-forward:
 
-> **Estado atual:** a promoção pelo mesmo digest está implementada, mas nunca foi exercitada por uma tag real. Não crie a tag nesta etapa. Antes do primeiro release, conclua revisão/merge/proteções e confirme que não há vulnerabilidade `CRITICAL` corrigível: o job `release-candidate` bloqueia qualquer `CRITICAL` corrigível e envia o report Trivy como artifact. A base deve permanecer em MegaLinter v9.5.0/Alpine 3.23 até uma release do Semgrep incorporar a correção OCaml/musl registrada em [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933) e [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21), seguida de nova matriz completa das duas flavors.
+> **Estado atual:** a tag `quality-v0.2.0`, criada em 2026-07-20, validou a `dotnetweb` com zero `CRITICAL` corrigível, mas foi bloqueada antes do candidato porque o gate total também estava aplicado à flavor `generic`, que não é publicada. Nenhum pacote foi promovido. Não mova nem reutilize essa tag; a correção segue como `0.2.1`.
 
-> **Bloqueador confirmado em 2026-07-15:** o scan local tem zero `CRITICAL` corrigível nos pacotes Alpine, mas ainda registra 13 ocorrências em toolchains/bibliotecas da imagem `dotnetweb` (18 na `generic`), incluindo componentes herdados Node, Go e .NET. A futura tag deve falhar até a remediação e uma nova varredura completa chegar a zero. Não afrouxe esse controle para publicar.
+> **Escopo corrigido em `0.2.1`:** as duas flavors continuam obrigadas a ter zero `CRITICAL` corrigível nos pacotes do sistema operacional. O bloqueio total de toolchains/bibliotecas na matriz de release é aplicado somente à `dotnetweb`, único artefato promovido. O candidato exato da `dotnetweb` também precisa permanecer com zero antes da publicação. A base deve permanecer em MegaLinter v9.5.0/Alpine 3.23 até uma release do Semgrep incorporar a correção OCaml/musl registrada em [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933) e [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21), seguida de nova matriz completa das duas flavors.
 
 Quando todos os pré-requisitos externos estiverem atendidos, a tag acionará este fluxo:
 
@@ -85,8 +85,8 @@ Quando todos os pré-requisitos externos estiverem atendidos, a tag acionará es
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -s quality-v0.2.0 -m "Quality Gate 0.2.0"
-git push origin quality-v0.2.0
+git tag -s quality-v0.2.1 -m "Quality Gate 0.2.1"
+git push origin quality-v0.2.1
 ```
 
 Se assinatura ainda não estiver configurada, use temporariamente tag anotada com `git tag -a` e registre assinatura como hardening pendente.
@@ -94,10 +94,10 @@ Se assinatura ainda não estiver configurada, use temporariamente tag anotada co
 O release inicial esperado para a aplicação .NET é:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.0-dotnetweb
+ghcr.io/rodrigojager/code-approval-quality-gate:0.2.1-dotnetweb
 ```
 
-Também será produzida uma tag `sha-<commit>-dotnetweb`. Não use a tag ambígua `0.2.0` e não publique/use `latest`.
+Também será produzida uma tag `sha-<commit>-dotnetweb`. Não use as tags ambíguas `0.2.1` ou `latest`.
 
 As referências intermediárias `validation-*` e `promotion-*` não são tags finais de consumo, mas permanecem no registry para permitir validação e promoção. Defina uma política de retenção/limpeza para o package privado antes da operação contínua e nunca remova uma referência usada por um workflow em andamento.
 
