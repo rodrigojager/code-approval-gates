@@ -97,6 +97,22 @@ Use `--non-blocking` quando o pipeline ou agente deve receber exit code `0` e le
 
 Use `--cwd <dir>` quando a ferramenta for executada de fora da raiz do projeto analisado.
 
+### Skills para agentes
+
+O repositório inclui duas skills Codex versionadas para agentes executarem os gates sem depender de instruções improvisadas:
+
+- `use-semantic-gate` orienta a escolha entre os escopos `changed`, `full` e `paths`, a configuração de objetivo/provider/modelo, a leitura dos relatórios semânticos e o ciclo de correção;
+- `use-quality-gate` orienta o preflight de Docker/imagem, a execução determinística, a leitura de `summary.json` e `quality-report.json` e o ciclo de correção.
+
+As duas skills usam a CLI unificada `code-approval-gates` em modo headless, registram o escopo efetivo e mantêm a mesma configuração entre as tentativas. Elas não permitem reduzir threshold, trocar provider/modelo, desabilitar checks, ampliar ignores, remover evidências ou enfraquecer baseline apenas para obter aprovação.
+
+Para uma revisão completa conduzida por agente, execute primeiro o gate semântico e depois o gate de qualidade, preservando os mesmos paths, ignores, thresholds e arquivos de saída em cada repetição:
+
+```powershell
+code-approval-gates semantic --scope changed --json --no-interactive --output .quality/reports/latest
+code-approval-gates quality --scope changed --json --no-interactive --output .quality/reports/latest
+```
+
 ### Tipos de analise
 
 Analise rapida das alteracoes Git:
@@ -504,6 +520,22 @@ For automation-parseable help, use `code-approval-gates help run --json --no-int
 Use `--non-blocking` when the pipeline or agent should receive exit code `0` and read approval/failure from the generated reports.
 
 Use `--cwd <dir>` when the tool runs outside the analyzed project root.
+
+### Agent skills
+
+The repository includes two versioned Codex skills so agents can execute the gates without relying on improvised instructions:
+
+- `use-semantic-gate` covers `changed`, `full`, and `paths` scope selection, objective/provider/model configuration, semantic report interpretation, and the fix loop;
+- `use-quality-gate` covers Docker/image preflight, deterministic execution, `summary.json` and `quality-report.json` interpretation, and the fix loop.
+
+Both skills use the unified `code-approval-gates` CLI in headless mode, report the effective scope, and keep the same configuration across retries. They do not allow lowering thresholds, switching provider/model, disabling checks, broadening ignores, removing evidence, or weakening baselines merely to obtain approval.
+
+For a complete agent-driven review, run the semantic gate first and the quality gate second, preserving the same paths, ignores, thresholds, and output files across retries:
+
+```powershell
+code-approval-gates semantic --scope changed --json --no-interactive --output .quality/reports/latest
+code-approval-gates quality --scope changed --json --no-interactive --output .quality/reports/latest
+```
 
 ### Analysis types
 
