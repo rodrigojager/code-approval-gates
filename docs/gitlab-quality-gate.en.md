@@ -2,7 +2,7 @@
 
 This is the canonical English guide for the first corporate pilot. It assumes a .NET web application, merge requests targeting `develop`, a GitLab Docker executor, and an existing hardened SonarQube job.
 
-> Current status: implementation exists on `final`, but the image is not published and no production digest exists. Keep the pilot advisory until image, scanner, GitLab, and governance validation is complete.
+> Current status: the `0.3.0` candidate is ready for review, but the new digests still depend on an approved merge to `main` and a protected release tag. Keep the pilot advisory until GitHub validation, package inspection, GitLab, and governance validation are complete.
 
 ## Pilot architecture
 
@@ -60,25 +60,28 @@ Do not use root, DinD, or a Docker socket as an ownership workaround.
 
 ## 3. Publish and pin the image
 
-The first .NET flavor is located by:
+The release workflow publishes both explicit flavors:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.1-dotnetweb
+ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-generic
+ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-dotnetweb
 ```
 
-The base is temporarily pinned by digest to MegaLinter v9.5.0/Alpine 3.23. MegaLinter v9.6/Alpine 3.24 with musl 1.2.6 triggered `Failed to allocate signal stack for domain 0` in Semgrep on affected Intel CPUs, related to [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933), with the fix merged in [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Upgrade only after a Semgrep release contains the fix and both flavors pass build, quick smoke, and full-image smokes again in CI.
+`generic` is the portable, broad-coverage image for mixed-technology repositories. `dotnetweb` uses a smaller base and analyzer allowlist for .NET/web repositories. The split makes image size, tool surface, and coverage predictable; it is not a security-tier split. Both images must pass the same complete vulnerability gate.
 
-The workflow implements promotion without a divergent rebuild. Tag `quality-v0.2.0` exercised the guard and validation matrix on 2026-07-20, but stopped before the candidate because the total gate also covered the non-published `generic` flavor. No final image was created by that attempt. The versioned correction is `0.2.1`:
+Version `0.3.0` pins MegaLinter v9.6.0/Alpine 3.24 by digest and installs Semgrep 1.170.0, which contains the required OCaml/musl runtime fix. The official .NET SDK 10.0.302, with runtime 10.0.10, is copied from a digest-pinned Microsoft image so that the SDK, runtime, and targeting packs remain coherent. Inherited Go tools are rebuilt from pinned commits with fixed dependencies, and vulnerable nested npm packages are replaced from checksum-pinned artifacts. Gherkin Lint and TSQLLint are removed because no fixed upstream release exists; SQLFluff keeps SQL analysis available.
+
+The workflow promotes without a divergent rebuild. Historical tag `quality-v0.2.0` proved that the gate blocked the vulnerable `generic` image, while `0.2.1` published only `dotnetweb`. Version `0.3.0` removes that exception and promotes both flavors:
 
 1. on pushes and pull requests, the `validate` matrix builds and runs smokes read-only, without logging in or writing to GHCR;
-2. on a `quality-v*` tag, the matrix still requires zero fixed `CRITICAL` OS findings in both flavors and zero findings of every class in the published `dotnetweb` flavor;
-3. `release-candidate` builds and pushes an intermediate `validation-*` tag, captures the produced digest, pulls that exact digest, and repeats the smokes;
+2. on a `quality-v*` tag, the matrix requires zero fixed `CRITICAL` findings across every class in both flavors;
+3. `release-candidate` builds and pushes an intermediate `validation-*` reference for each flavor, captures the produced digests, pulls those exact digests, and repeats the smokes;
 4. the same candidate runs the full Trivy scan, blocks every fixed `CRITICAL` vulnerability, and uploads the report as an audit artifact;
 5. only after that validation, `publish` promotes the same digest to final tags with `docker buildx imagetools create`; the job does not rebuild the image.
 
 Intermediate `validation-*` and `promotion-*` tags remain an operational risk. Keep the package private and define retention/cleanup before operating releases continuously; do not delete a reference required by an in-progress run.
 
-The 2026-07-20 workflow scan confirmed zero fixed `CRITICAL` vulnerabilities in `dotnetweb`. The validation-only `generic` flavor still has toolchain/library findings but zero OS findings. Those findings do not relax the published-image gate: `dotnetweb` and its exact release candidate must remain at zero across every class.
+A complete local scan of the remediated toolchain layer reached zero fixed `CRITICAL` vulnerabilities. After the official .NET SDK was integrated, the final `generic` image passed its build, quick smoke, and an isolated non-root .NET restore. The complete scan of both exact digests remains mandatory in GitHub Actions; no intermediate result authorizes promotion.
 
 Run the final GitLab job by immutable digest:
 
@@ -86,7 +89,7 @@ Run the final GitLab job by immutable digest:
 CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:REAL_DIGEST
 ```
 
-Do not use `latest`, `0.2.1`, or a mutable flavor tag in production. Keep the first package private while reviewing layers, labels, SBOM, and provenance. If private, use a read-only `read:packages` service account stored in the runner/vault, never in repository YAML, image layers, artifacts, or logs. Making a GHCR package public is irreversible.
+Do not use `latest`, `0.3.0-generic`, `0.3.0-dotnetweb`, or another mutable flavor tag in production. Keep the first package private while reviewing layers, labels, SBOM, and provenance. If private, use a read-only `read:packages` service account stored in the runner/vault, never in repository YAML, image layers, artifacts, or logs. Making a GHCR package public is irreversible.
 
 ## 4. Governed policy
 
@@ -185,10 +188,10 @@ Enable central blocking only after real full-image smoke, analyzer/MSBuild harde
 ## Acceptance checklist
 
 - [ ] Dedicated `linux/amd64`, UID `10001`, unprivileged runner without socket.
-- [ ] `dotnetweb` image published, inspected, and pinned by digest.
-- [ ] MegaLinter v9.5.0/Alpine 3.23 base confirmed by digest; any upgrade reran the complete matrix.
+- [ ] `generic` and `dotnetweb` images published, inspected, and pinned by their respective digests.
+- [ ] MegaLinter v9.6.0/Alpine 3.24 bases confirmed by digest and the complete matrix passed.
 - [x] The workflow promotes the exact validated digest without a publication-job rebuild.
-- [ ] The full scan reached zero fixed `CRITICAL` toolchain/library findings (local state: 13 in `dotnetweb`).
+- [ ] The complete scan reached zero fixed `CRITICAL` OS, toolchain, and library findings in both exact candidates.
 - [ ] A real tag demonstrated candidate validation, the Trivy report artifact, and promotion of the same digest.
 - [ ] Retention/cleanup is defined for private `validation-*` and `promotion-*` tags.
 - [ ] External `schemaVersion: 1` policy and digest governed outside MR YAML.
@@ -197,7 +200,7 @@ Enable central blocking only after real full-image smoke, analyzer/MSBuild harde
 - [ ] Optional transport root-owned `0444`, CA-only, no proxy credential.
 - [ ] CI Lint passes with the real corporate Sonar include.
 - [ ] Full image smoke and required scanners validated.
-- [ ] The `generic` flavor confirmed 20 MegaLinter analyzers + 8 tools; dedicated Terrascan v1.19.9 runs in project mode over a Terraform-only projection.
+- [ ] The `generic` flavor confirmed its current analyzer and tool matrix; dedicated Terrascan v1.19.9 runs in project mode over a Terraform-only projection.
 - [ ] Egress and caching for Terrascan/Terraform Registry were tested without exposing credentials to the MR.
 - [ ] A maintained replacement for archived Terrascan is being evaluated in shadow mode, with no switch before proven parity.
 - [ ] Analyzer configs, suppressions, and C#/MSBuild behavior inventoried.

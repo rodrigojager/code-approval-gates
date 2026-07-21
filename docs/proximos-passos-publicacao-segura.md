@@ -7,9 +7,9 @@ Este checklist começa quando a branch `final` estiver revisada. Ele não conté
 - `final` publicada no GitHub para revisão;
 - PR de `final` para `main` com checks obrigatórios;
 - unit tests, clean-clone verify, build das flavors `generic` e `dotnetweb`, full smoke e scan da imagem aprovados;
-- base MegaLinter v9.5.0/Alpine 3.23 fixada por digest; upgrade bloqueado até release corrigida do Semgrep e nova validação completa;
+- bases MegaLinter v9.6.0/Alpine 3.24 fixadas por digest, Semgrep 1.170.0 e matriz completa validados;
 - `PATH` root-owned/toolchains e execução non-root validados nas duas flavors;
-- flavor `generic` validada com 20 analisadores MegaLinter + 8 ferramentas: `TERRAFORM_TERRASCAN` desabilitado no MegaLinter e Terrascan v1.19.9 dedicado, em project mode, sobre projeção temporária Terraform com anchors somente-comentário nos ancestrais necessários e falha fechada para `scan_errors`;
+- flavor `generic` validada com sua matriz ampla de analisadores: `TERRAFORM_TERRASCAN` desabilitado no MegaLinter e Terrascan v1.19.9 dedicado, em project mode, sobre projeção temporária Terraform com anchors somente-comentário nos ancestrais necessários e falha fechada para `scan_errors`;
 - risco de manutenção registrado: o [repositório oficial do Terrascan foi arquivado em 20/11/2025](https://github.com/tenable/terrascan); manter v1.19.9 nesta entrega evita regressão, mas um substituto mantido deve ser avaliado em shadow mode antes de qualquer troca;
 - workflow implementado para promover exatamente o manifesto/digest validado, sem rebuild no job de publicação, ainda não exercitado por tag real;
 - Gitleaks aprovado no histórico e na árvore atual com redaction;
@@ -71,9 +71,9 @@ Mantenha Secret scanning e Push protection habilitados.
 
 Depois do merge e de atualizar `main` por fast-forward:
 
-> **Estado atual:** a tag `quality-v0.2.0`, criada em 2026-07-20, validou a `dotnetweb` com zero `CRITICAL` corrigível, mas foi bloqueada antes do candidato porque o gate total também estava aplicado à flavor `generic`, que não é publicada. Nenhum pacote foi promovido. Não mova nem reutilize essa tag; a correção segue como `0.2.1`.
+> **Estado atual:** a tag histórica `quality-v0.2.0`, criada em 2026-07-20, foi bloqueada corretamente pela `generic` vulnerável; `0.2.1` publicou apenas `dotnetweb`. Não mova nem reutilize essas tags. A correção que torna os dois flavors publicáveis segue como `0.3.0`.
 
-> **Escopo corrigido em `0.2.1`:** as duas flavors continuam obrigadas a ter zero `CRITICAL` corrigível nos pacotes do sistema operacional. O bloqueio total de toolchains/bibliotecas na matriz de release é aplicado somente à `dotnetweb`, único artefato promovido. O candidato exato da `dotnetweb` também precisa permanecer com zero antes da publicação. A base deve permanecer em MegaLinter v9.5.0/Alpine 3.23 até uma release do Semgrep incorporar a correção OCaml/musl registrada em [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933) e [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21), seguida de nova matriz completa das duas flavors.
+> **Escopo corrigido em `0.3.0`:** `generic` e `dotnetweb` são promovidas e ambas precisam ter zero `CRITICAL` corrigível em sistema operacional, toolchains e bibliotecas. A base foi atualizada para MegaLinter v9.6.0/Alpine 3.24 e Semgrep 1.170.0. O SDK .NET oficial 10.0.302, com runtime 10.0.10, vem de uma imagem Microsoft fixada por digest. Toolchains Go vulneráveis foram reconstruídas a partir de commits fixados com dependências atualizadas; dependências npm aninhadas foram substituídas por artefatos com checksum. Gherkin Lint e TSQLLint foram removidos por não terem release upstream corrigida; SQLFluff continua disponível.
 
 Quando todos os pré-requisitos externos estiverem atendidos, a tag acionará este fluxo:
 
@@ -85,19 +85,20 @@ Quando todos os pré-requisitos externos estiverem atendidos, a tag acionará es
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -s quality-v0.2.1 -m "Quality Gate 0.2.1"
-git push origin quality-v0.2.1
+git tag -s quality-v0.3.0 -m "Quality Gate 0.3.0"
+git push origin quality-v0.3.0
 ```
 
 Se assinatura ainda não estiver configurada, use temporariamente tag anotada com `git tag -a` e registre assinatura como hardening pendente.
 
-O release inicial esperado para a aplicação .NET é:
+O release esperado produz duas referências versionadas:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate:0.2.1-dotnetweb
+ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-generic
+ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-dotnetweb
 ```
 
-Também será produzida uma tag `sha-<commit>-dotnetweb`. Não use as tags ambíguas `0.2.1` ou `latest`.
+Também serão produzidas tags `sha-<commit>-generic` e `sha-<commit>-dotnetweb`. Não use tags mutáveis em execução: após a inspeção, fixe o digest do flavor escolhido.
 
 As referências intermediárias `validation-*` e `promotion-*` não são tags finais de consumo, mas permanecem no registry para permitir validação e promoção. Defina uma política de retenção/limpeza para o package privado antes da operação contínua e nunca remova uma referência usada por um workflow em andamento.
 
@@ -176,9 +177,9 @@ Se token aparecer em commit, PR, issue, artifact, screenshot ou log:
 - [ ] Rulesets de branch e tags ativos.
 - [ ] Tag criada a partir do `main` aprovado.
 - [ ] Package privado inspecionado.
-- [ ] Flavor `dotnetweb` e arquitetura confirmadas.
-- [ ] Base MegaLinter v9.5.0/Alpine 3.23 e seus digests conferidos.
-- [ ] Upgrade da base condicionado a release corrigida do Semgrep e nova matriz completa.
+- [ ] Flavors `generic` e `dotnetweb` e arquitetura confirmadas.
+- [ ] Bases MegaLinter v9.6.0/Alpine 3.24 e seus digests conferidos.
+- [ ] Semgrep 1.170.0 e nova matriz completa confirmados.
 - [x] Workflow implementa promoção do digest exato validado, sem rebuild divergente.
 - [ ] Uma tag real comprovou candidate, report Trivy e promoção do mesmo digest.
 - [ ] Scan Trivy completo chegou a zero `CRITICAL` corrigível em toolchains e bibliotecas.
@@ -189,7 +190,7 @@ Se token aparecer em commit, PR, issue, artifact, screenshot ou log:
 - [ ] Política e SHA ficam fora do MR.
 - [ ] Target branch/ref remoto e timeout são governados centralmente.
 - [ ] Runtime non-root UID `10001` validado no runner real.
-- [ ] `generic` confirmou 20 analisadores MegaLinter + 8 ferramentas, com Terrascan v1.19.9 dedicado em project mode sobre projeção somente Terraform.
+- [ ] `generic` confirmou sua matriz ampla atual, com Terrascan v1.19.9 dedicado em project mode sobre projeção somente Terraform.
 - [ ] Egress/cache de Terrascan e Terraform Registry testados sem credenciais no checkout, imagem ou artifacts.
 - [ ] Substituto mantido para o Terrascan arquivado avaliado em shadow mode; remoção condicionada à paridade cross-file/evidência/fail-closed.
 - [ ] CI Lint e três MRs não bloqueantes concluídos.

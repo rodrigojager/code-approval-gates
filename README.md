@@ -353,10 +353,10 @@ Em pipelines consumidores, rode `code-approval-gates` para o fluxo unificado loc
 
 Para o Quality Gate corporativo, use a imagem standalone por digest e o comando container-native `quality-ci`. O pacote `code-approval-gates` não está publicado no npm; portanto, não use `npm install -g code-approval-gates` em pipelines consumidoras.
 
-Configure imagem, policy externa ao checkout, SHA-256 da policy, target branch e runner tag em configuração central do GitLab e copie/inclua `examples/ci/gitlab-quality-gate.yml` por Pipeline Execution Policy/compliance CI antes de tornar o gate bloqueante. A imagem final deve ter este formato:
+Configure imagem, policy externa ao checkout, SHA-256 da policy, target branch e runner tag em configuração central do GitLab e copie/inclua `examples/ci/gitlab-quality-gate.yml` por Pipeline Execution Policy/compliance CI antes de tornar o gate bloqueante. Escolha `generic` para repositórios com tecnologias variadas ou `dotnetweb` para o conjunto mais enxuto de .NET/web; ambas passam pelo mesmo gate de vulnerabilidades. A imagem final deve ser fixada pelo digest do flavor escolhido:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<digest-dotnetweb-publicado>
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<digest-do-flavor-publicado>
 ```
 
 O template chama somente `/usr/local/bin/quality-ci check`, roda changed scope contra `origin/<target-branch>` sem confiar no diff-base do job, materializa a árvore do commit sem `.git`, não executa testes do MR e publica somente JSON, Markdown e scope manifest. Ele permanece advisory até o hardening dos scanners e enforcement central. O overlay `examples/ci/gitlab-quality-and-sonarqube.yml` exige o job Sonar hardened da empresa. O tutorial completo está em `docs/plano-gitlab-quality-gate.md`.
@@ -761,10 +761,10 @@ In consumer pipelines, run `code-approval-gates` for the unified local/host work
 
 For the corporate Quality Gate, use the standalone image by digest and the container-native `quality-ci` command. The `code-approval-gates` package is not published to npm, so consumer pipelines must not run `npm install -g code-approval-gates`.
 
-Configure the image, policy outside the checkout, policy SHA-256, target branch, and runner tag in central GitLab configuration, then enforce `examples/ci/gitlab-quality-gate.yml` through Pipeline Execution Policy/compliance CI before blocking. The final image reference has this shape:
+Configure the image, policy outside the checkout, policy SHA-256, target branch, and runner tag in central GitLab configuration, then enforce `examples/ci/gitlab-quality-gate.yml` through Pipeline Execution Policy/compliance CI before blocking. Choose `generic` for mixed-technology repositories or `dotnetweb` for the narrower .NET/web analyzer set; both pass the same vulnerability gate. Pin the selected flavor by digest:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-dotnetweb-digest>
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-flavor-digest>
 ```
 
 The template calls only `/usr/local/bin/quality-ci check`, resolves changed scope from `origin/<target-branch>` rather than a job-provided diff base, materializes the commit tree without `.git`, never executes MR tests, and uploads only JSON, Markdown, and the scope manifest. It remains advisory until scanner hardening and central enforcement are complete. The `examples/ci/gitlab-quality-and-sonarqube.yml` overlay requires the company's hardened Sonar job. See `docs/gitlab-quality-gate.en.md`.

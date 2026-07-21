@@ -384,6 +384,10 @@ MEGALINTER_GENERIC_DUPLICATE_LINTERS = ",".join(
         "REPOSITORY_OSV_SCANNER",
         "REPOSITORY_SEMGREP",
         "REPOSITORY_TRIVY",
+        # The upstream packages have no release that fixes the critical
+        # transitive dependencies removed from the published image.
+        "GHERKIN_GHERKIN_LINT",
+        "SQL_TSQLLINT",
         "TERRAFORM_TERRASCAN",
     ]
 )
@@ -436,6 +440,12 @@ def _run_megalinter(root: Path, raw_dir: Path) -> ToolResult:
         # quality gate must reject unformatted code instead of silently
         # approving it as a successful analyzer run.
         "FORMATTERS_DISABLE_ERRORS": "false",
+        # These cache paths are image-owned policy, not job-controlled input.
+        # MegaLinter's base image otherwise points NuGet at a root-only cache,
+        # causing dotnet-format restore to fail under UID 10001.
+        "DOTNET_CLI_HOME": "/home/quality",
+        "NUGET_HTTP_CACHE_PATH": "/home/quality/.cache/NuGet/v3-cache",
+        "NUGET_PACKAGES": "/home/quality/.nuget/packages",
         "FILTER_REGEX_EXCLUDE": _megalinter_exclude_regex(root),
         "MEGALINTER_CONFIG": MEGALINTER_TRUSTED_CONFIG,
         # DevSkim is a project-mode analyzer and scans the workspace directly,

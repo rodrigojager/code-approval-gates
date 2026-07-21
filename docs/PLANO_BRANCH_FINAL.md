@@ -98,31 +98,31 @@ Lacunas encontradas nas implementações de origem e tratadas ou mantidas como p
 
 | Item planejado | Estado | Evidência/arquivo |
 | --- | --- | --- |
-| Dockerfile com versões/checksums pinados | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | Dockerfile, builds das duas flavors e pinos MegaLinter v9.5.0/Alpine 3.23 auditados |
-| Compatibilidade da base MegaLinter em runners Intel | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | v9.5.0/Alpine 3.23 fixada por digest; v9.6/Alpine 3.24 bloqueada temporariamente |
+| Dockerfile com versões/checksums pinados | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | Dockerfile, builds das duas flavors e pinos MegaLinter v9.6.0/Alpine 3.24 auditados |
+| Compatibilidade da base MegaLinter em runners Intel | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | v9.6.0/Alpine 3.24 fixada por digest e Semgrep 1.170.0 validado |
 | Corrigir conflitos pip e executar `pip check` | CONCLUÍDO localmente | build-smoke nos três venvs isolados |
 | Flavor genérica preservada | CONCLUÍDO localmente | build/smokes `generic` |
 | Flavor inicial `.NET web` explícita | CONCLUÍDO localmente | build/smokes `dotnetweb` |
 | Tool version smoke | CONCLUÍDO localmente | build + quick smoke |
-| Full scanner smoke saudável | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | full-clean com 5 analisadores MegaLinter + 7 ferramentas no `dotnetweb` e 20 analisadores MegaLinter + 8 ferramentas no `generic` |
+| Full scanner smoke saudável | EM VALIDAÇÃO NO CI | `generic` final passou build, quick smoke e restore .NET non-root isolado; full-clean/full-finding dos dois digests exatos serão repetidos na matriz `0.3.0` |
 | Isolar outputs dos analisadores project-mode | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | DevSkim ignora `.quality/**`; smoke inclui canário HTTP nesse diretório e evita corrida contra o SBOM CycloneDX gerado pelo próprio MegaLinter |
 | Terrascan dedicado na flavor `generic` | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | MegaLinter desabilita `TERRAFORM_TERRASCAN`; Terrascan v1.19.9 roda em project mode sobre projeção temporária dos arquivos Terraform, com anchors sintéticos somente-comentário nos ancestrais necessários; regras cross-file e layouts aninhados são preservados sem excluir diretórios `bin`/`obj` legítimos, e qualquer `scan_errors` bloqueia o gate |
 | Sustentação do Terrascan | RISCO ACEITO; MIGRAÇÃO PENDENTE | o [repositório oficial foi arquivado em 20/11/2025](https://github.com/tenable/terrascan); manter v1.19.9 pinado para preservar cobertura agora e avaliar substituto mantido em shadow mode, sem remover a ferramenta até comprovar paridade de regras cross-file, evidência e política de bloqueio |
 | Fixture com finding e erro operacional | CONCLUÍDO localmente | full-finding e tool-error |
 | Execução non-root validada | CONCLUÍDO localmente | UID/GID 10001 no quick smoke |
 | `PATH` e toolchains protegidos na execução non-root | CONCLUÍDO localmente | launcher recompõe `PATH` root-owned; smokes executam scanners como UID/GID 10001 |
-| Scan Trivy da imagem | CONCLUÍDO localmente e no código; EM VALIDAÇÃO no GitHub | ambas as imagens: schema 2, resultado `os-pkgs` e zero `CRITICAL` corrigível de sistema; o scan completo de 2026-07-15 encontrou 18 ocorrências em toolchains/libs no `generic` e 13 no `dotnetweb`; tag exige zero em qualquer classe e envia o relatório como artifact |
+| Scan Trivy da imagem | REMEDIAÇÃO VERIFICADA LOCALMENTE; CANDIDATOS EXATOS EM VALIDAÇÃO no GitHub | o scan completo da camada com as toolchains remediadas chegou a zero `CRITICAL` corrigível; após integrar o SDK .NET oficial, o Docker local ficou instável durante o scan longo, portanto a tag continua exigindo zero em qualquer classe nos dois digests exatos e envia relatórios separados como artifacts |
 | SBOM e proveniência de build | CONCLUÍDO no código; EM VALIDAÇÃO por tag real | `release-candidate` gera ambos; workflow de release ainda não foi exercitado por tag |
 | Arquitetura `linux/amd64` | CONCLUÍDO como limite inicial | workflow/docs; outras arquiteturas não prometidas |
 | Inputs runtime mutáveis registrados | CONCLUÍDO | `analysisInput` registra o bundle pinado do Terrascan e `runtimeInputs` registra `registry.terraform.io` como não pinado/network-required, além dos inputs de Semgrep, Trivy e OSV; rede/cache continuam parte do ambiente de execução |
 | Transport proxy/CA root-owned sem credenciais | CONCLUÍDO localmente; PENDENTE EXTERNO no runner | `/etc/code-approval/quality-gate-transport.env`, UID 10001/image smoke |
-| Medir tamanho/tempo/memória | CONCLUÍDO para tamanho/tempo local; PENDENTE EXTERNO no piloto | base v9.5.0: 3.529.995.484 bytes (3,288 GiB) dotnetweb; 6.529.331.092 bytes (6,081 GiB) generic; memória/recursos no runner ainda pendentes |
+| Medir tamanho/tempo/memória | EM ATUALIZAÇÃO para `0.3.0`; PENDENTE EXTERNO no piloto | o scan completo da base .NET pode exceder 15 minutos; workflow reserva 30 minutos ao Trivy e 180 minutos ao job; memória/recursos no runner ainda pendentes |
 | Promover exatamente o artefato validado, sem rebuild divergente | CONCLUÍDO no código; EM VALIDAÇÃO por tag real | `release-candidate` captura e valida o digest construído; `publish` apenas promove esse digest com `docker buildx imagetools create` |
 | Retenção de tags intermediárias do GHCR | PENDENTE EXTERNO | definir package privado e limpeza/retenção para `validation-*` e `promotion-*` antes da operação contínua |
-| Remediar `CRITICAL` corrigíveis das toolchains antes do primeiro release | BLOQUEADOR DE RELEASE | atualizar/testar componentes herdados Node, Go, Ruby e .NET; o `release-candidate` permanece fail-closed e nenhuma tag real foi criada |
+| Remediar `CRITICAL` corrigíveis das toolchains antes do release `0.3.0` | IMPLEMENTADO NOS DOIS FLAVORS; EM VALIDAÇÃO FINAL no CI | ferramentas Go reconstruídas com Go 1.25.7 e gRPC corrigido; pacotes npm herdados atualizados por checksum; SDK .NET oficial coerente; Gherkin Lint e TSQLLint removidos por falta de release segura |
 | Assinatura/attestation adicional | PENDENTE | hardening posterior |
 
-A base permanece temporariamente fixada em MegaLinter v9.5.0/Alpine 3.23. Em runners Intel afetados, v9.6/Alpine 3.24 com musl 1.2.6 expôs um crash do runtime OCaml usado pelo Semgrep (`Failed to allocate signal stack for domain 0`). O problema está registrado em [ocaml/ocaml#14933](https://github.com/ocaml/ocaml/pull/14933) e a correção foi integrada no fork em [semgrep/ocaml#21](https://github.com/semgrep/ocaml/pull/21). Não atualizar a base até existir uma release do Semgrep que incorpore a correção e a matriz completa de build, quick smoke e full smokes das duas flavors passar novamente no CI.
+A base foi atualizada para MegaLinter v9.6.0/Alpine 3.24 com Semgrep 1.170.0, que incorpora a correção do crash OCaml/musl observado anteriormente em runners Intel. O SDK .NET 10.0.302, o runtime 10.0.10 e os targeting packs vêm da mesma imagem oficial Microsoft fixada por digest, evitando a combinação incoerente criada pelo upgrade de pacotes Alpine. Os digests das bases permanecem explícitos, e qualquer atualização futura precisa repetir build, quick smoke, full smokes e Trivy completo nos dois flavors.
 
 ## Fase 5 — CI e regressão
 
@@ -134,8 +134,8 @@ A base permanece temporariamente fixada em MegaLinter v9.5.0/Alpine 3.23. Em run
 | Clean clone em Ubuntu e Windows | CONCLUÍDO em clone local Windows; EM VALIDAÇÃO no CI | clone novo ficou limpo; jobs Ubuntu/Windows pendentes |
 | Suites root, Quality Node/Python e Semantic | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | `npm run verify` final |
 | `npm pack --dry-run` | CONCLUÍDO localmente | root, Semantic e Quality no verify final |
-| Build generic + dotnetweb | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | builds locais finais das duas flavors |
-| Quick/full/image smoke | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | quick/full-clean/full-finding + tool-error em ambas; generic confirmou 20 analisadores MegaLinter + 8 resultados de ferramentas com Terrascan dedicado |
+| Build generic + dotnetweb | `generic` final CONCLUÍDO localmente; matriz completa EM VALIDAÇÃO no CI | a correção comum está no Dockerfile dos dois flavors; o build local final da `generic` foi gerado após integrar o SDK oficial |
+| Quick/full/image smoke | PARCIALMENTE CONCLUÍDO localmente; EM VALIDAÇÃO no CI | `generic` final passou quick e restore .NET non-root; full-clean anterior percorreu os demais analisadores e revelou a inconsistência .NET agora corrigida; a matriz repete quick/tool-error/full-clean/full-finding nos dois candidatos exatos |
 | Testar approved/rejected/needs-changes/operational | CONCLUÍDO localmente | suites e smoke |
 | Gitleaks histórico/diretório com redaction | CONCLUÍDO localmente; EM VALIDAÇÃO no CI | 13 commits + 62,02 MB, zero leaks, Gitleaks 8.30.1 pinned |
 | GitLab CI Lint | PENDENTE EXTERNO | resultado da instância da empresa |
@@ -181,7 +181,7 @@ Todos os itens abaixo são externos; nenhum deve ser marcado concluído por test
 | Abrir PR `final -> main` | PENDENTE EXTERNO | URL do PR |
 | Configurar branch/tag rulesets | PENDENTE EXTERNO | Settings/API GitHub |
 | Aprovar e integrar PR | PENDENTE EXTERNO | merge commit/checks |
-| Criar tag protegida `quality-v0.2.0` | PENDENTE EXTERNO | tag em commit de `main` |
+| Criar tag protegida `quality-v0.3.0` | PENDENTE EXTERNO | tag em commit de `main` após aprovação dos checks |
 | Publicar package GHCR privado | PENDENTE EXTERNO | package/version/workflow |
 | Inspecionar layers/SBOM/proveniência | PENDENTE EXTERNO | digest e revisão registrada |
 | Decidir privado versus público | PENDENTE EXTERNO | decisão explícita; público é irreversível |
@@ -193,7 +193,7 @@ A iniciativa só está concluída quando:
 
 1. a branch e o PR estão visíveis no GitHub;
 2. todos os checks de clean clone/regressão/imagem estão verdes;
-3. o package `dotnetweb` foi publicado e inspecionado;
+3. os packages `generic` e `dotnetweb` foram publicados e inspecionados;
 4. o GitLab real passou no CI Lint e executou três MRs não bloqueantes;
 5. policy/evidence/runner/egress estão governados fora do MR;
 6. Quality Gate e SonarQube funcionam em paralelo;
@@ -201,23 +201,23 @@ A iniciativa só está concluída quando:
 8. o bloqueio foi ativado somente após aceite do piloto;
 9. nenhuma credencial, token, URL interna ou PII corporativa entrou no repositório, imagem ou artifacts.
 
-## Evidência local registrada em 15/07/2026
+## Evidência local atualizada em 20/07/2026
 
 | Verificação | Resultado |
 | --- | --- |
-| `npm run verify` na árvore final | root 38/38; Semantic 23/23; Quality Node 30/30; Quality Python 98/98; três packs secos aprovados |
-| clone novo `--no-hardlinks` da branch + `npm run verify` | mesmas quatro suítes/packs aprovados; `git status` permaneceu limpo; clone temporário removido com path validado |
-| `python -W error::ResourceWarning -m unittest discover -s quality-gate/tests -p "test_*.py"` | 98/98 testes aprovados |
+| Suítes locais na árvore final | root 38/38; Semantic build + 23/23; Quality Node 30/30; Quality Python executou 98 testes, com 4 skips esperados e os demais aprovados |
+| Packs secos | root, Semantic e Quality aprovados; o cache npm foi direcionado a diretório temporário por restrição do perfil Windows |
+| `python -m unittest discover -s quality-gate/tests -p "test_*.py"` | 98 testes executados, com 4 skips esperados e os demais aprovados, incluindo contrato estático do Dockerfile e do workflow |
 | `test_quality_ci.py` dentro da suíte | 21/21: ref governada, spoof de env, policy externa, source limpa por `git archive`, symlink/gitlink, flags/waiver recusados, suporte .NET e sanitização |
-| Builds/smokes `dotnetweb` | base MegaLinter v9.5.0/Alpine 3.23; imagem final 3.529.995.484 bytes (3,288 GiB), ID `sha256:781978ed2f48...`; quick/tool-error/full-clean/full-finding aprovados; clean 5 analisadores MegaLinter + 7/7 ferramentas dedicadas, 0 findings |
-| Builds/smokes `generic` | base MegaLinter v9.5.0/Alpine 3.23; imagem final 6.529.331.092 bytes (6,081 GiB), ID `sha256:3ee7058ae6e5...`; quick/tool-error/full-clean/full-finding aprovados; clean 20 analisadores MegaLinter + 8/8 ferramentas dedicadas, incluindo Terrascan v1.19.9 em project mode, 0 findings; canário `.quality` confirmou isolamento do DevSkim e o finding smoke comprovou `AC_AWS_0207` cross-file em Terraform aninhado |
-| Trivy local nas imagens finais | schema 2 e resultado `os-pkgs` presentes; zero vulnerabilidades `CRITICAL` corrigíveis de sistema nas duas flavors; scan completo: 18 ocorrências no `generic` e 13 no `dotnetweb`, portanto uma tag seria corretamente bloqueada |
-| `actionlint` 1.7.12 + auditoria de pinos | workflows sem achados; 7 actions, 2 digests MegaLinter v9.5.0 e checksum Gitleaks conferidos |
+| Build/smokes `generic` final | base MegaLinter v9.6.0/Alpine 3.24, Semgrep 1.170.0 e SDK oficial .NET 10.0.302/runtime 10.0.10; build concluído, quick smoke com score 100 e restore .NET non-root sem avisos ou erros |
+| Build/smokes `dotnetweb` | a correção usa o mesmo Dockerfile e stage .NET; o candidato exato será reconstruído e validado pela matriz remota antes de qualquer promoção |
+| Trivy local | a camada com todas as toolchains remediadas chegou a zero vulnerabilidades `CRITICAL` corrigíveis; o scan do candidato final após o stage .NET não terminou porque o Docker Desktop deixou de responder, por isso o workflow não aceita publicação sem repetir o scan completo dos dois digests exatos |
+| `actionlint` 1.7.12 + auditoria de pinos | workflows sem achados; actions, dois digests MegaLinter v9.6.0, digest do SDK Microsoft e checksums de downloads conferidos |
 | `npm audit --omit=dev --workspaces=false` | zero vulnerabilidades em root, Semantic e Quality |
 | Gitleaks 8.30.1 pinned, config/ignore governados e redaction | 13 commits + 62,02 MB do diretório; zero leaks |
 | `python -m compileall`, `bash -n`, parse JSON/PyYAML e `git diff --check` | aprovados; apenas avisos de normalização EOL |
 
-Essas verificações não substituem clean clone no GitHub Actions, CI Lint ou piloto no GitLab. O workflow já evita rebuild divergente no job de publicação, mas uma tag real não deve ser criada enquanto o scan completo continuar encontrando `CRITICAL` corrigíveis nas toolchains; depois da remediação, ainda será necessário comprovar `release-candidate`/`publish`, o artifact Trivy e o digest promovido remotamente.
+Essas verificações não substituem clean clone no GitHub Actions, CI Lint ou piloto no GitLab. O workflow evita rebuild divergente no job de publicação, mas uma tag real só pode ser criada a partir da `main` aprovada; depois disso, `release-candidate` precisa comprovar zero `CRITICAL` corrigível nos dois digests exatos antes de `publish`, preservar os artifacts Trivy e registrar os digests promovidos.
 
 ## Como atualizar este plano
 
