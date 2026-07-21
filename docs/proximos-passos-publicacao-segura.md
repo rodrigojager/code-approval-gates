@@ -24,7 +24,7 @@ Nos próximos releases, não crie uma tag apenas para testar se o workflow funci
 | Credencial | Uso | Local correto | Nunca colocar em |
 | --- | --- | --- | --- |
 | `GITHUB_TOKEN` automático | publicar no GHCR | job de release do GitHub Actions | secret criado manualmente, Dockerfile ou log |
-| PAT classic `read:packages` | pull de package privado | conta técnica + runner dedicado | repositório ou script do MR |
+| PAT classic `read:packages` | somente para mirror/package privado opcional | conta técnica + runner dedicado | repositório ou script do MR |
 | `SONAR_TOKEN` | SonarQube existente | variável GitLab masked/protected | YAML público ou artifact |
 | política corporativa | enforcement | arquivo governado externo | branch do MR |
 | SHA-256 da política | integridade | variável de grupo/projeto | default mutável no YAML |
@@ -92,20 +92,25 @@ git push origin quality-v0.3.0
 
 Se assinatura ainda não estiver configurada, use temporariamente tag anotada com `git tag -a` e registre assinatura como hardening pendente.
 
-O release esperado produz duas referências versionadas:
+O release publicado possui duas referências versionadas:
 
 ```text
 ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-generic
 ghcr.io/rodrigojager/code-approval-quality-gate:0.3.0-dotnetweb
 ```
 
-Também serão produzidas tags `sha-<commit>-generic` e `sha-<commit>-dotnetweb`. Não use tags mutáveis em execução: após a inspeção, fixe o digest do flavor escolhido.
+Também foram produzidas tags `sha-<commit>-generic` e `sha-<commit>-dotnetweb`. Não use tags mutáveis em execução: fixe um destes digests do release `0.3.0`:
 
-As referências intermediárias `validation-*` e `promotion-*` não são tags finais de consumo, mas permanecem no registry para permitir validação e promoção. Defina uma política de retenção/limpeza para o package privado antes da operação contínua e nunca remova uma referência usada por um workflow em andamento.
+```text
+generic:   ghcr.io/rodrigojager/code-approval-quality-gate@sha256:e2c7094d604e1caead6a04ac5f88d74a19ea0651d8c8adcaf42bc71fee367c9c
+dotnetweb: ghcr.io/rodrigojager/code-approval-quality-gate@sha256:b0bf03909506254b7150710613ab5ebab7c18be23055437bffcf6df0791669db
+```
+
+As referências intermediárias `validation-*` e `promotion-*` não são tags finais de consumo, mas permanecem no registry para permitir validação e promoção. Defina uma política de retenção/limpeza antes da operação contínua e nunca remova uma referência usada por um workflow em andamento.
 
 ## Inspeção do package
 
-Mantenha a primeira publicação privada e confira:
+O release `0.3.0` passou pela inspeção abaixo. Repita-a em cada novo release:
 
 - commit, versão e flavor;
 - digest `sha256:`;
@@ -117,19 +122,21 @@ Mantenha a primeira publicação privada e confira:
 - ausência de Semantic Gate;
 - versões dos scanners e `pip check`.
 
-Uma imagem privada não é lugar seguro para secrets. Qualquer usuário com pull pode inspecionar todas as layers. Tornar o package público é irreversível; faça isso somente após revisão explícita.
+O package atual está público, portanto todas as layers podem ser inspecionadas anonimamente. Nunca inclua secrets, URLs internas ou dados corporativos na imagem, mesmo quando usar um registry privado.
 
 Terrascan v1.19.9 está pinado, mas os metadados de `registry.terraform.io` continuam um input mutável/network-required, assim como regras e bancos dos demais scanners. O relatório distingue o bundle pinado desse input de runtime não pinado. Antes do GitLab, teste allowlist de egress e cache persistente gravável pelo UID `10001`; não armazene token de registry no cache, na imagem, no checkout ou em artifacts.
 
-## Pull privado no runner
+## Pull no runner
 
-Use conta técnica GitHub com acesso `Read` somente ao package e PAT classic limitado a `read:packages`. No host do runner, autentique o usuário real do serviço com `--password-stdin`; não passe o token na linha de comando.
+O package público aceita pull anônimo e não exige `docker login` nem PAT no runner. Restrinja `allowed_images` ao repositório GHCR e continue executando sem privileged/socket.
+
+Se a empresa criar um mirror privado, use uma conta técnica com acesso somente de leitura e credencial limitada ao registry. No host do runner, autentique o usuário real do serviço com `--password-stdin`; não passe o token na linha de comando.
 
 ```bash
-read -rsp "GHCR read token: " GHCR_READ_TOKEN
-printf '%s' "$GHCR_READ_TOKEN" | sudo -H -u gitlab-runner \
-  docker login ghcr.io --username quality-gate-reader --password-stdin
-unset GHCR_READ_TOKEN
+read -rsp "Registry read token: " REGISTRY_READ_TOKEN
+printf '%s' "$REGISTRY_READ_TOKEN" | sudo -H -u gitlab-runner \
+  docker login registry.example.invalid --username quality-gate-reader --password-stdin
+unset REGISTRY_READ_TOKEN
 sudo chmod 600 /home/gitlab-runner/.docker/config.json
 ```
 
@@ -137,10 +144,10 @@ Prefira credential helper quando a infraestrutura oferecer um. O runner precisa 
 
 ## Fixação por digest
 
-Depois da inspeção, configure fora do repositório consumidor:
+Configure fora do repositório consumidor o digest do flavor escolhido. Para a flavor `generic`:
 
 ```text
-CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:DIGEST_VERIFICADO
+CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:e2c7094d604e1caead6a04ac5f88d74a19ea0651d8c8adcaf42bc71fee367c9c
 ```
 
 Registre também o digest anterior aprovado. O rollback altera essa variável para o digest anterior; tags não são movidas ou apagadas.
@@ -191,7 +198,7 @@ Se token aparecer em commit, PR, issue, artifact, screenshot ou log:
 - [ ] Política e SHA ficam fora do MR.
 - [ ] Target branch/ref remoto e timeout são governados centralmente.
 - [ ] Runtime non-root UID `10001` validado no runner real.
-- [ ] `generic` confirmou sua matriz ampla atual, com Terrascan v1.19.9 dedicado em project mode sobre projeção somente Terraform.
+- [x] `generic` confirmou sua matriz ampla atual, com Terrascan v1.19.9 dedicado em project mode sobre projeção somente Terraform.
 - [ ] Egress/cache de Terrascan e Terraform Registry testados sem credenciais no checkout, imagem ou artifacts.
 - [ ] Substituto mantido para o Terrascan arquivado avaliado em shadow mode; remoção condicionada à paridade cross-file/evidência/fail-closed.
 - [ ] CI Lint e três MRs não bloqueantes concluídos.

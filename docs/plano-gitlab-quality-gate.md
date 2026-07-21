@@ -86,19 +86,20 @@ O workflow implementa promoção sem reconstrução divergente. A tag histórica
 4. o mesmo candidate executa o scan Trivy completo, bloqueia qualquer vulnerabilidade `CRITICAL` corrigível e envia o relatório como artifact para auditoria;
 5. somente após essa validação, `publish` promove o mesmo digest para as tags finais com `docker buildx imagetools create`; esse job não reconstrói a imagem.
 
-As tags intermediárias `validation-*` e `promotion-*` são um risco operacional residual. Mantenha o package privado e defina política de retenção/limpeza antes de operar releases continuamente; não apague uma referência necessária durante uma execução em andamento.
+As tags intermediárias `validation-*` e `promotion-*` são um risco operacional residual. Defina uma política de retenção/limpeza antes de operar releases continuamente, independentemente da visibilidade do package; não apague uma referência necessária durante uma execução em andamento.
 
-Um scan local completo da camada com as toolchains remediadas chegou a zero `CRITICAL` corrigível. Depois da incorporação do SDK .NET oficial, a imagem `generic` final passou no build, no quick smoke e em um restore .NET isolado como usuário non-root. O scan completo dos dois digests exatos continua obrigatório no GitHub Actions; nenhum resultado intermediário autoriza promoção.
+O release `quality-v0.3.0` e a revalidação posterior de `main` comprovaram build, quick smoke, erro operacional, full-clean, full-finding e Trivy nas duas flavors. Os dois candidatos exatos chegaram a zero `CRITICAL` corrigível em sistema operacional, toolchains e bibliotecas antes da promoção.
 
-Após o build, copie o digest real e configure no GitLab:
+Configure no GitLab o digest imutável do flavor escolhido:
 
 ```text
-CODE_APPROVAL_QUALITY_IMAGE=ghcr.io/rodrigojager/code-approval-quality-gate@sha256:DIGEST_REAL
+generic:   ghcr.io/rodrigojager/code-approval-quality-gate@sha256:e2c7094d604e1caead6a04ac5f88d74a19ea0651d8c8adcaf42bc71fee367c9c
+dotnetweb: ghcr.io/rodrigojager/code-approval-quality-gate@sha256:b0bf03909506254b7150710613ab5ebab7c18be23055437bffcf6df0791669db
 ```
 
 Não execute produção com `latest`, `0.3.0-generic` ou `0.3.0-dotnetweb`. A tag localiza o release e identifica o flavor; o digest imutável executa o job.
 
-Mantenha o primeiro package privado enquanto revisa layers, labels, SBOM e proveniência. Se o GHCR continuar privado, use uma conta técnica com somente `read:packages`; armazene o PAT no cofre/runner, nunca no repositório, YAML, imagem, artifact ou log. Tornar o package público é uma decisão irreversível no GHCR.
+O package `code-approval-quality-gate` está público e seus manifests aceitam pull anônimo; portanto, o runner não precisa de PAT `read:packages`. Continue fixando o digest imutável. Se uma cópia privada for criada em outro registry, use uma conta técnica somente-leitura e armazene a credencial no cofre/runner, nunca no repositório, YAML, imagem, artifact ou log.
 
 ## 4. Policy corporativa
 
@@ -228,19 +229,20 @@ Rollback: altere centralmente `CODE_APPROVAL_QUALITY_IMAGE` para o digest anteri
 ## Checklist
 
 - [ ] Runner `linux/amd64`, UID `10001`, sem root/privileged/socket.
-- [ ] Imagens `generic` e `dotnetweb` publicadas, inspecionadas e fixadas por seus respectivos digests.
-- [ ] Bases MegaLinter v9.6.0/Alpine 3.24 confirmadas por digest e matriz completa aprovada.
+- [x] Imagens `generic` e `dotnetweb` publicadas e inspecionadas por seus respectivos digests.
+- [ ] GitLab configurado para usar o digest imutável do flavor escolhido.
+- [x] Bases MegaLinter v9.6.0/Alpine 3.24 confirmadas por digest e matriz completa aprovada.
 - [x] O workflow promove o digest exato validado, sem rebuild no job de publicação.
-- [ ] O scan completo chegou a zero `CRITICAL` corrigível em sistema, toolchains e bibliotecas nos dois candidatos exatos.
-- [ ] Uma tag real demonstrou candidate, scan Trivy, artifact e promoção do mesmo digest.
-- [ ] Retenção/limpeza das tags privadas `validation-*` e `promotion-*` foi definida.
+- [x] O scan completo chegou a zero `CRITICAL` corrigível em sistema, toolchains e bibliotecas nos dois candidatos exatos.
+- [x] Uma tag real demonstrou candidate, scan Trivy, artifact e promoção do mesmo digest.
+- [ ] Retenção/limpeza das tags intermediárias `validation-*` e `promotion-*` foi definida.
 - [ ] Policy externa com `schemaVersion: 1` e SHA governado.
 - [ ] Target branch governada e `refs/remotes/origin/<target>` disponível.
 - [ ] Pipeline Execution Policy/compliance definida antes de blocking.
 - [ ] Transporte proxy/CA, se usado, root-owned `0444` e sem segredo.
 - [ ] CI Lint aprovado com o include Sonar corporativo real.
-- [ ] Full image smoke e scanners obrigatórios validados.
-- [ ] Flavor `generic` confirmou sua matriz atual de analisadores e ferramentas; Terrascan v1.19.9 dedicado roda em project mode sobre projeção apenas Terraform.
+- [x] Full image smoke e scanners obrigatórios validados nas duas flavors.
+- [x] Flavor `generic` confirmou sua matriz atual de analisadores e ferramentas; Terrascan v1.19.9 dedicado roda em project mode sobre projeção apenas Terraform.
 - [ ] Egress e cache para Terrascan/Terraform Registry foram testados sem expor credenciais ao MR.
 - [ ] Um substituto mantido para o Terrascan arquivado está sendo avaliado em shadow mode, sem troca antes da paridade comprovada.
 - [ ] Linters/configs/suppressions/MSBuild inventariados.
