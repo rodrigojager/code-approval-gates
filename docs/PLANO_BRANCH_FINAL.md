@@ -1,6 +1,8 @@
 # Plano de integração e acompanhamento da branch `final`
 
-Este documento transforma o inventário inicial em checklist auditável. Ele deve permanecer na branch para que código, testes, publicação e implantação possam ser comparados com o plano original sem depender de conversas externas.
+> **Registro histórico:** a branch `final` foi integrada e aposentada. `main` é a única linha canônica; `generic` e `dotnetweb` são flavors publicados por tags e digests, não por branches.
+
+Este documento transforma o inventário inicial em checklist auditável. Ele permanece no repositório para que código, testes, publicação e implantação possam ser comparados com o plano original sem depender de conversas externas.
 
 Atualize a coluna **Estado** somente com evidência verificável. Não marque uma ação externa como concluída porque o código correspondente existe.
 
@@ -13,6 +15,7 @@ Atualize a coluna **Estado** somente com evidência verificável. Não marque um
 | PENDENTE EXTERNO | depende de GitHub/GHCR/GitLab/runner/empresa |
 | PENDENTE | trabalho de código/documentação ainda não comprovado |
 | FORA DE ESCOPO AGORA | preservado, sem evolução nesta fase |
+| NÃO SE APLICA | condição dispensada pela decisão ou arquitetura atual |
 
 ## Baseline e composição
 
@@ -21,7 +24,7 @@ Atualize a coluna **Estado** somente com evidência verificável. Não marque um
 | Criar `final` a partir de `origin/main` | CONCLUÍDO | histórico Git da branch |
 | Integrar a camada language-agnostic | CONCLUÍDO | merge no histórico e arquivos policy/evidence |
 | Integrar a fundação GitLab/GHCR | CONCLUÍDO | merge no histórico e workflow/template |
-| Resolver conflitos sem apagar funcionalidades | CONCLUÍDO localmente; EM VALIDAÇÃO no CI remoto | `npm run verify`, image smokes e diff final |
+| Resolver conflitos sem apagar funcionalidades | CONCLUÍDO | `npm run verify`, image smokes, checks remotos e diff final |
 | Manter Semantic Gate sem novo desenvolvimento | FORA DE ESCOPO AGORA | suite Semantic como regressão |
 | Preservar documentação PT/EN | CONCLUÍDO | README e tutoriais PT-BR/EN |
 
@@ -173,25 +176,25 @@ A base foi atualizada para MegaLinter v9.6.0/Alpine 3.24 com Semgrep 1.170.0, qu
 
 ## Fase 8 — Publicação GitHub/GHCR
 
-Todos os itens abaixo são externos; nenhum deve ser marcado concluído por teste local:
+Os itens concluídos abaixo possuem evidência remota no GitHub/GHCR; os demais continuam dependendo da configuração administrativa ou do ambiente corporativo:
 
 | Item planejado | Estado | Evidência obrigatória |
 | --- | --- | --- |
-| Publicar `final` no GitHub | PENDENTE EXTERNO | branch/SHA remoto |
-| Abrir PR `final -> main` | PENDENTE EXTERNO | URL do PR |
+| Integrar `final` em `main` | CONCLUÍDO | PR #3 e merge `2b20973` |
+| Manter uma única branch canônica | CONCLUÍDO | `main`; flavors definidos por tags/digests |
 | Configurar branch/tag rulesets | PENDENTE EXTERNO | Settings/API GitHub |
-| Aprovar e integrar PR | PENDENTE EXTERNO | merge commit/checks |
-| Criar tag protegida `quality-v0.3.0` | PENDENTE EXTERNO | tag em commit de `main` após aprovação dos checks |
-| Publicar package GHCR privado | PENDENTE EXTERNO | package/version/workflow |
-| Inspecionar layers/SBOM/proveniência | PENDENTE EXTERNO | digest e revisão registrada |
-| Decidir privado versus público | PENDENTE EXTERNO | decisão explícita; público é irreversível |
-| Configurar pull privado, se necessário | PENDENTE EXTERNO | conta técnica `read:packages` no runner |
+| Integrar correção da toolchain `generic` | CONCLUÍDO | PR #9, merge `7c49ee8` e checks aprovados |
+| Criar tag `quality-v0.3.0` | CONCLUÍDO | tag no merge aprovado de `main` |
+| Publicar flavors no GHCR | CONCLUÍDO | `0.3.0-generic`, `0.3.0-dotnetweb` e digests registrados |
+| Gerar SBOM/proveniência | CONCLUÍDO | artifacts e atestação OCI do workflow de release |
+| Decidir privado versus público | CONCLUÍDO | package público, com manifests acessíveis sem autenticação |
+| Configurar pull privado, se necessário | NÃO SE APLICA | o package publicado é público |
 
 ## Critérios finais de conclusão
 
 A iniciativa só está concluída quando:
 
-1. a branch e o PR estão visíveis no GitHub;
+1. `main`, a tag de release e os digests imutáveis estão visíveis no GitHub/GHCR;
 2. todos os checks de clean clone/regressão/imagem estão verdes;
 3. os packages `generic` e `dotnetweb` foram publicados e inspecionados;
 4. o GitLab real passou no CI Lint e executou três MRs não bloqueantes;

@@ -1,22 +1,23 @@
 # Publicação segura do Quality Gate e entrega ao GitLab
 
-Este checklist começa quando a branch `final` estiver revisada. Ele não contém credenciais, URLs internas ou valores do GitLab da empresa.
+Este documento registra a publicação realizada e os passos ainda necessários para adoção no GitLab da empresa. Ele não contém credenciais, URLs internas ou valores do ambiente corporativo.
 
-## Estado que deve existir antes do release
+## Estado comprovado no release 0.3.0
 
-- `final` publicada no GitHub para revisão;
-- PR de `final` para `main` com checks obrigatórios;
+- implementação consolidada em `main`; a branch temporária `final` foi integrada pelo PR #3 e aposentada;
+- correção das bibliotecas da toolchain `generic` integrada pelo PR #9 com checks obrigatórios;
 - unit tests, clean-clone verify, build das flavors `generic` e `dotnetweb`, full smoke e scan da imagem aprovados;
 - bases MegaLinter v9.6.0/Alpine 3.24 fixadas por digest, Semgrep 1.170.0 e matriz completa validados;
 - `PATH` root-owned/toolchains e execução non-root validados nas duas flavors;
 - flavor `generic` validada com sua matriz ampla de analisadores: `TERRAFORM_TERRASCAN` desabilitado no MegaLinter e Terrascan v1.19.9 dedicado, em project mode, sobre projeção temporária Terraform com anchors somente-comentário nos ancestrais necessários e falha fechada para `scan_errors`;
 - risco de manutenção registrado: o [repositório oficial do Terrascan foi arquivado em 20/11/2025](https://github.com/tenable/terrascan); manter v1.19.9 nesta entrega evita regressão, mas um substituto mantido deve ser avaliado em shadow mode antes de qualquer troca;
-- workflow implementado para promover exatamente o manifesto/digest validado, sem rebuild no job de publicação, ainda não exercitado por tag real;
+- workflow executado pela tag `quality-v0.3.0`, promovendo exatamente o manifesto/digest validado, sem rebuild no job de publicação;
 - Gitleaks aprovado no histórico e na árvore atual com redaction;
-- branch `main` e tags `quality-v*` protegidas;
+- package GHCR público e pull anônimo dos manifests comprovado;
+- proteção de `main` e das tags `quality-v*` deve permanecer configurada no GitHub;
 - nenhum package/tag criado a partir de commit fora de `main`.
 
-Não crie uma tag apenas para testar se o workflow funciona. Pushes e Pull Requests fazem build e smokes read-only, sem conceder `packages: write`; candidate e publicação existem somente no fluxo futuro de tag, depois do merge e das proteções exigidas.
+Nos próximos releases, não crie uma tag apenas para testar se o workflow funciona. Pushes e Pull Requests fazem build e smokes read-only, sem conceder `packages: write`; candidate e publicação existem somente no fluxo de tag, depois da atualização de `main` e das proteções exigidas.
 
 ## Credenciais
 
@@ -171,21 +172,21 @@ Se token aparecer em commit, PR, issue, artifact, screenshot ou log:
 
 ## Checklist
 
-- [ ] `final` revisada por PR, sem push direto em `main`.
-- [ ] Actions e permissões revisadas.
-- [ ] Gitleaks histórico/diretório aprovado.
+- [x] Implementação consolidada na única branch canônica `main`.
+- [x] Actions e permissões revisadas.
+- [x] Gitleaks histórico/diretório aprovado.
 - [ ] Rulesets de branch e tags ativos.
-- [ ] Tag criada a partir do `main` aprovado.
-- [ ] Package privado inspecionado.
-- [ ] Flavors `generic` e `dotnetweb` e arquitetura confirmadas.
-- [ ] Bases MegaLinter v9.6.0/Alpine 3.24 e seus digests conferidos.
-- [ ] Semgrep 1.170.0 e nova matriz completa confirmados.
+- [x] Tag `quality-v0.3.0` criada a partir do `main` aprovado.
+- [x] Package público inspecionado por manifests e pull anônimo.
+- [x] Flavors `generic` e `dotnetweb` e arquitetura confirmadas.
+- [x] Bases MegaLinter v9.6.0/Alpine 3.24 e seus digests conferidos.
+- [x] Semgrep 1.170.0 e nova matriz completa confirmados.
 - [x] Workflow implementa promoção do digest exato validado, sem rebuild divergente.
-- [ ] Uma tag real comprovou candidate, report Trivy e promoção do mesmo digest.
-- [ ] Scan Trivy completo chegou a zero `CRITICAL` corrigível em toolchains e bibliotecas.
+- [x] Uma tag real comprovou candidate, report Trivy e promoção do mesmo digest.
+- [x] Scan Trivy completo chegou a zero `CRITICAL` corrigível em toolchains e bibliotecas.
 - [ ] Retenção/limpeza das referências privadas `validation-*` e `promotion-*` foi definida.
-- [ ] SBOM, proveniência e digest registrados.
-- [ ] Pull privado usa conta técnica `read:packages`, se necessário.
+- [x] SBOM, proveniência e digest registrados pelo workflow de release.
+- [x] Pull público não exige credencial `read:packages` no runner.
 - [ ] GitLab fixa a imagem por digest.
 - [ ] Política e SHA ficam fora do MR.
 - [ ] Target branch/ref remoto e timeout são governados centralmente.
