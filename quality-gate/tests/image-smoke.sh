@@ -45,23 +45,32 @@ run_toolchain_and_non_root_smoke() {
     done
     test "$(command -v jscpd)" = "/usr/local/bin/jscpd"
     test "$(jscpd --version)" = "cpd 5.0.12"
+    test ! -e /usr/local/dotnet-tools/.store/tsqllint
+    ! command -v tsqllint
+    test ! -e /node-deps/node_modules/gherkin-lint
+    test ! -e /node-deps/node_modules/protobufjs
     if test "$(< /etc/code-approval/quality-gate-flavor)" = "dotnetweb"; then
-      test "$(command -v csharpier)" = "/opt/megalinter-dotnet-tools/csharpier"
-      test "$(command -v roslynator)" = "/opt/megalinter-dotnet-tools/roslynator"
+      test "$(command -v csharpier)" = "/usr/local/dotnet-tools/csharpier"
+      test "$(command -v roslynator)" = "/usr/local/dotnet-tools/roslynator"
       csharpier --version >/dev/null
       roslynator --version >/dev/null
     else
       test "$(command -v terrascan)" = "/usr/bin/terrascan"
       test "$(terrascan version)" = "version: v1.19.9"
-      for tool in csharpier devskim roslynator tsqllint; do
-        test "$(command -v "$tool")" = "/opt/megalinter-dotnet-tools/$tool"
+      test "$(editorconfig-checker --version)" = "v3.7.0"
+      test "$(ls-lint --version | head -n 1)" = "ls-lint v2.3.1"
+      test "$(protolint version)" = "protolint version v0.56.4(latest)"
+      go version -m /usr/bin/protolint | grep -E "dep[[:space:]]+google.golang.org/grpc[[:space:]]+v1.79.3"
+      go version -m /usr/bin/terrascan | grep -E "dep[[:space:]]+google.golang.org/grpc[[:space:]]+v1.82.0"
+      for tool in csharpier devskim roslynator; do
+        test "$(command -v "$tool")" = "/usr/local/dotnet-tools/$tool"
         "$tool" --version >/dev/null
       done
       for tool in phpcs phpstan psalm phplint php-cs-fixer; do
-        test "$(command -v "$tool")" = "/opt/megalinter-composer/vendor/bin/$tool"
+        test "$(command -v "$tool")" = "/usr/local/composer/vendor/bin/$tool"
         "$tool" --version >/dev/null
       done
-      test "$(command -v cargo-clippy)" = "/opt/megalinter-rust-toolchain/bin/cargo-clippy"
+      test "$(command -v cargo-clippy)" = "/usr/local/bin/cargo-clippy"
       cargo-clippy --version >/dev/null
       cargo_smoke=/tmp/quality-cargo-smoke
       mkdir -p "$cargo_smoke/src"
@@ -336,6 +345,9 @@ run_full_clean_smoke() {
       echo "full-clean did not produce quality-report.json" >&2
     fi
     if test "$gate_status" != "0"; then
+      echo "full-clean analyzer diagnostics:" >&2
+      find "$target/.quality/reports" -type f -iname "*dotnet*" \
+        -print -exec tail -n 200 {} \; >&2 || true
       exit "$gate_status"
     fi
     jq -e ".status == \"APPROVED\" and (.findings | length == 0)" "$report" >/dev/null

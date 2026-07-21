@@ -22,21 +22,29 @@ class StaticQualityGateContractTests(unittest.TestCase):
     def test_dockerfile_contains_complete_sidecar_toolchain(self) -> None:
         dockerfile = read("Dockerfile")
         required_fragments = [
-            "ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.5.0@sha256:00830d91da662d05221c1c0005f9010416030bd1da89afbcb55a9c52945ebd48",
+            "ARG MEGALINTER_IMAGE=ghcr.io/oxsecurity/megalinter:v9.6.0@sha256:248e30b43bdfa7ce941fd5e410159da4d69716c68c48a459b08d1760c4625ef5",
+            "ARG DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0.302-alpine3.23-amd64@sha256:2073294f05c2676f2e11b1782188654435e77e28adaed77a1138b0ca4693dd3b",
             "ARG GITLEAKS_BUILDER_IMAGE=golang:1.25.7-alpine3.23@sha256:724e212d86d79b45b7ace725b44ff3b6c2684bfd3131c43d5d60441de151d98e",
             "ARG GITLEAKS_SOURCE_COMMIT=83d9cd684c87d95d656c1458ef04895a7f1cbd8e",
             "ARG GITLEAKS_SOURCE_SHA256=6b2638a733b85619dc80bdf28e84e4fed7e526a761ab5c148fbf67695aea2115",
+            "ARG EDITORCONFIG_CHECKER_SOURCE_COMMIT=03db2cca9a525b3831377be1e4696c06fdfef07a",
+            "ARG LS_LINT_SOURCE_COMMIT=b530dd769e259aa9fc546cc3c0098e6a0c82870e",
+            "ARG PROTOLINT_SOURCE_COMMIT=67278bf4e14fdfc8bdafef823b8e76eb403ed9ba",
+            "ARG TERRASCAN_SOURCE_COMMIT=bd6d393de9800a8777029e3920d6e432a11fcfcd",
+            "ARG PROTOLINT_GRPC_VERSION=1.79.3",
+            "ARG TERRASCAN_GRPC_VERSION=1.82.0",
             "ARG QUALITY_GATE_FLAVOR=generic",
             '"semgrep==${SEMGREP_INSTALL_VERSION}"',
             '"checkov==${CHECKOV_INSTALL_VERSION}"',
             "/opt/venvs/semgrep/bin/pip check",
             "/opt/venvs/checkov/bin/pip check",
             "/opt/venvs/quality-sidecar/bin/pip check",
-            "gitleaks/gitleaks/archive/${GITLEAKS_SOURCE_COMMIT}.tar.gz",
+            'fetch_source gitleaks gitleaks/gitleaks "${GITLEAKS_SOURCE_COMMIT}" "${GITLEAKS_SOURCE_SHA256}"',
             "go mod download",
             "-tags gore2regex",
             "go1.25.7",
-            "COPY --from=gitleaks-builder --chown=0:0 --chmod=0555 /out/gitleaks /usr/local/bin/gitleaks",
+            "RUN --mount=from=gitleaks-builder,source=/out,target=/opt/patched-go-tools,readonly",
+            "install -o root -g root -m 0555 /opt/patched-go-tools/gitleaks /usr/local/bin/gitleaks",
             "ARG TRIVY_INSTALL_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea",
             "ARG OSV_SCANNER_INSTALL_SHA256=15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0",
             "aquasecurity/trivy",
@@ -44,22 +52,29 @@ class StaticQualityGateContractTests(unittest.TestCase):
             "osv-scanner_linux_${release_arch}",
             'npm install -g "jscpd@${JSCPD_INSTALL_VERSION}"',
             "apk upgrade --no-cache",
+            "COPY --from=dotnet-sdk --chown=0:0 /usr/share/dotnet /usr/share/dotnet",
+            'test "$(dotnet --version)" = "10.0.302"',
+            'test "$(dotnet --list-runtimes | awk',
+            "NUGET_HTTP_CACHE_PATH=/home/quality/.cache/NuGet/v3-cache",
             "chmod 0555 /usr/bin/hadolint",
-            "cp -al /root/.dotnet/tools/. /opt/megalinter-dotnet-tools/",
+            "chmod 0555 \"${arm_ttk_target}\"",
             "npm pkg delete 'dependencies.gherkin-lint' --prefix /node-deps",
             "/node-deps/node_modules/protobufjs",
-            "for unused_binary in editorconfig-checker kubeconform ls-lint protolint",
-            "/root/.dotnet/tools/.store/tsqllint",
-            "cp -al /root/.composer/vendor/. /opt/megalinter-composer/vendor/",
-            "cp -al /root/.rustup/toolchains/stable-x86_64-unknown-linux-musl/. /opt/megalinter-rust-toolchain/",
+            "for unused_binary in editorconfig-checker kubeconform ls-lint protolint terrascan",
+            "/usr/local/dotnet-tools/.store/tsqllint",
+            "ARG WEBSOCKET_DRIVER_INSTALL_VERSION=0.7.5",
+            "ARG WEBSOCKET_DRIVER_INSTALL_SHA256=54755bff23a142069c08d2cfee75e38a64e79e49cbe7d1c48857b65482ab0b56",
+            "ARG NPM_TAR_INSTALL_VERSION=7.5.19",
+            "ARG NPM_TAR_INSTALL_SHA256=191644f88c7dbd61121f913231ab328d1fc621f058e8ca334451b17cad85dfae",
+            "test \"${patched_count}\" -eq 2",
             "aa3808d2dbb71e8522c274ace56b86bddbd6e41e8c93e1626fe8c0693c5ab72a",
             "54ccd8bc063777753f3f55b8d61cd85c6fa972c140729ad939225ee60db94d20",
             "tee /dev/stderr",
-            'ENV PATH="/usr/local/bin:/opt/megalinter-dotnet-tools:/opt/megalinter-composer/vendor/bin:/opt/megalinter-rust-toolchain/bin:${PATH}"',
+            "ENV DOTNET_ROOT=/usr/share/dotnet",
+            'PATH="/usr/local/bin:${PATH}"',
             "append_trusted_path",
             "case \"${candidate}\" in /*)",
             "[0-7][0145][15]",
-            "test ! -e /opt/megalinter-composer/auth.json",
             'test "$(command -v jscpd)" = "/usr/local/bin/jscpd"',
             "sha256sum -c -",
             'test "${TARGETARCH}" = "amd64"',
@@ -286,7 +301,7 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("sbom: true", workflow)
         self.assertIn("load: true", workflow)
         self.assertIn("QUALITY_GATE_FLAVOR=${{ matrix.flavor }}", workflow)
-        self.assertIn("validated-dotnetweb-digest", workflow)
+        self.assertIn("validated-${{ matrix.flavor }}-digest", workflow)
         self.assertIn("docker buildx imagetools create", workflow)
         self.assertIn('[[ "$actual_digest" == "$validated_digest" ]]', workflow)
         self.assertIn("persist-credentials: false", workflow)
@@ -311,15 +326,12 @@ class StaticQualityGateContractTests(unittest.TestCase):
         self.assertIn("full-clean", workflow)
         self.assertIn("tool-error", workflow)
         self.assertIn("aquasecurity/trivy-action@", workflow)
-        self.assertEqual(workflow.count("timeout: 15m"), 2)
-        self.assertIn("Enforce no fixed critical OS vulnerabilities", workflow)
-        self.assertIn(
-            "Block published dotnetweb releases on any fixed critical vulnerability", workflow
-        )
-        self.assertIn(
-            "if: startsWith(github.ref, 'refs/tags/quality-v') && matrix.flavor == 'dotnetweb'",
-            workflow,
-        )
+        self.assertEqual(workflow.count("timeout: 30m"), 2)
+        self.assertEqual(workflow.count("timeout-minutes: 180"), 2)
+        self.assertIn("Enforce no fixed critical vulnerabilities", workflow)
+        self.assertIn("Require complete report with zero fixed critical vulnerabilities", workflow)
+        self.assertNotIn("matrix.flavor == 'dotnetweb'", workflow)
+        self.assertIn("Publish versioned ${{ matrix.flavor }} image", workflow)
         self.assertIn("trivy-critical-${{ matrix.flavor }}", workflow)
         self.assertIn('release_version="${RELEASE_TAG#quality-v}"', workflow)
         self.assertIn("require('./package.json').version", workflow)

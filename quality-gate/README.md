@@ -160,11 +160,18 @@ CODE_APPROVAL_QUALITY_POLICY_FILE=/etc/code-approval-gates/company-policy.json
 CODE_APPROVAL_QUALITY_POLICY_SHA256=<sha256>
 ```
 
-The release workflow builds `generic` and `dotnetweb` flavors. The initial published .NET artifact is named `0.2.1-dotnetweb`, but production GitLab jobs must pin its published digest:
+The release workflow validates and publishes two explicit flavors with the same vulnerability gate:
+
+- `0.3.0-generic` is the portable, broad-coverage image for repositories with mixed technologies;
+- `0.3.0-dotnetweb` is the narrower image for .NET/web repositories, with a smaller analyzer allowlist.
+
+The flavor split is a packaging and coverage choice, not a security exception. Production GitLab jobs must select the appropriate flavor and then pin its published digest:
 
 ```text
-ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-dotnetweb-digest>
+ghcr.io/rodrigojager/code-approval-quality-gate@sha256:<published-flavor-digest>
 ```
+
+Version `0.3.0` upgrades the base to MegaLinter v9.6.0 and Semgrep 1.170.0. It copies the official .NET SDK 10.0.302 and runtime 10.0.10 from a digest-pinned Microsoft image so that the SDK, runtime, and targeting packs remain coherent. Vulnerable inherited Go tools were rebuilt from pinned source commits with updated dependencies, and vulnerable nested npm packages were replaced from checksum-pinned artifacts. Gherkin Lint and TSQLLint were removed because no fixed upstream release exists; SQLFluff remains available for SQL analysis.
 
 Use `examples/ci/gitlab-quality-gate.yml`. The image runs as UID/GID `10001`; the job uses no root override, DinD, privileged runner, Docker socket, npm install, or Semantic Gate and uploads only normalized JSON, Markdown, and scope-manifest artifacts. `examples/ci/gitlab-quality-and-sonarqube.yml` is an overlay that must extend the company's hardened Sonar job.
 
